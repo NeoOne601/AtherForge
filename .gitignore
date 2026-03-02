@@ -1,0 +1,93 @@
+# AetherForge v1.0 — .gitignore
+# ─────────────────────────────────────────────────────────────────
+# Keeps secrets, model weights, user data, and build artifacts out
+# of version control while preserving project structure via .gitkeep
+
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.pth
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ── Node / Frontend ─────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ── Rust / Tauri ────────────────────────────────────────────────
+target/
+src-tauri/target/
+Cargo.lock           # keep for libraries, not binaries — flip if needed
+
+# ── Data & Models ───────────────────────────────────────────────
+# User data, replay buffers, encrypted DBs — NEVER committed
+data/
+!data/.gitkeep
+# Model weights are large; use DVC or direct download scripts
+models/*.gguf
+models/*.bin
+models/*.safetensors
+models/*.pt
+!models/.gitkeep
+
+# ── Secrets & Config ────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+age_keys/
+passkey_store/
+
+# ── SQLCipher / encrypted stores ────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# ── Logs & Telemetry ────────────────────────────────────────────
+*.log
+logs/
+langfuse_local/
+
+# ── OS & Editor ─────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Tauri Build Artifacts ────────────────────────────────────────
+src-tauri/target/
+*.app
+*.dmg
+*.exe
+*.msi
+*.deb
+*.AppImage
+bundles/

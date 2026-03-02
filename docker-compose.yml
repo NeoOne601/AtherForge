@@ -1,0 +1,102 @@
+# AetherForge v1.0 — docker-compose.yml
+# ─────────────────────────────────────────────────────────────────
+# OPTIONAL: Only needed for the self-hosted telemetry stack
+# (Langfuse + Neo4j). The core AetherForge app runs without Docker.
+# Run: docker compose up -d
+# Stop: docker compose down
+
+version: "3.9"
+
+services:
+  # ── Self-Hosted Langfuse (local telemetry, no cloud) ───────────
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: aetherforge-langfuse
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: "postgresql://langfuse:langfuse@postgres:5432/langfuse"
+      NEXTAUTH_SECRET: "aetherforge-local-secret-change-me"
+      NEXTAUTH_URL: "http://localhost:3000"
+      SALT: "aetherforge-salt-change-me"
+      DIRECT_URL: "postgresql://langfuse:langfuse@postgres:5432/langfuse"
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── PostgreSQL (Langfuse backend) ──────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aetherforge-postgres
+    restart: unless-stopped
+    volumes:
+      - langfuse_db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Neo4j (X-Ray Causal Graph Storage) ────────────────────────
+  neo4j:
+    image: neo4j:5.20-community
+    container_name: aetherforge-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # HTTP Browser
+      - "7687:7687"   # Bolt (used by Python driver)
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    environment:
+      NEO4J_AUTH: "neo4j/aetherforge123"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_server_memory_heap_initial__size: "512m"
+      NEO4J_server_memory_heap_max__size: "1g"
+    healthcheck:
+      test: ["CMD-SHELL", "neo4j status | grep -q running"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ── OPA (Open Policy Agent — Silicon Colosseum backend) ────────
+  opa:
+    image: openpolicyagent/opa:0.65.0-rootless
+    container_name: aetherforge-opa
+    restart: unless-stopped
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=info"
+      - "--set=decision_logs.console=true"
+      - "/policies"
+    volumes:
+      - ./src/guardrails:/policies:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/health | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  langfuse_db:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+
+networks:
+  default:
+    name: aetherforge-net
+    driver: bridge
