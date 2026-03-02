@@ -237,7 +237,7 @@ class BitNetTrainer:
         # ── Save checkpoint ───────────────────────────────────────
         checkpoint_path = self._checkpoint_dir / f"{task_id}_adapter.npz"
         import numpy as np
-        np.savez_compressed(
+        np.savez(
             checkpoint_path,
             task_id=task_id,
             A=projected_lora.A,

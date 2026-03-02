@@ -28,10 +28,12 @@ import typer
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status, UploadFile, File, Request, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from src.config import AetherForgeSettings, get_settings
 from src.guardrails.silicon_colosseum import SiliconColosseum
@@ -49,6 +51,7 @@ class AppState:
     replay_buffer: ReplayBuffer
     colosseum: SiliconColosseum
     scheduler: AsyncIOScheduler
+    vector_store: Any
     startup_ms: float
 
 
@@ -80,13 +83,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await state.replay_buffer.initialize()
     logger.info("Replay buffer ready at %s", settings.replay_buffer_path)
 
+    # ── 2.5 Initialise local Vector Store (ChromaDB) ──────────────
+    logger.info("Initializing ChromaDB and local sentence-transformers...")
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    state.vector_store = Chroma(
+        persist_directory=str(settings.chroma_path), 
+        embedding_function=embeddings
+    )
+    logger.info("ChromaDB active at %s", settings.chroma_path)
+
     # ── 3. Initialise Silicon Colosseum (OPA + FSM) ───────────────
     state.colosseum = SiliconColosseum(settings)
     await state.colosseum.initialize()
     logger.info("Silicon Colosseum guardrails active | mode=%s", settings.opa_mode)
 
     # ── 4. Initialise LangGraph Meta-Agent (loads BitNet model) ───
-    state.meta_agent = MetaAgent(settings, state.colosseum)
+    state.meta_agent = MetaAgent(settings, state.colosseum, state.vector_store)
     await state.meta_agent.initialize()
     logger.info("Meta-agent ready | modules=5 | model=%s", settings.bitnet_model_path.name)
 
@@ -185,6 +197,35 @@ async def system_status() -> JSONResponse:
         "ram_total_gb": round(psutil.virtual_memory().total / 1e9, 2),
         "modules": ["ragforge", "localbuddy", "watchtower", "streamsync", "tunelab"],
     })
+
+
+@app.post("/api/v1/ragforge/upload", tags=["RAGForge"])
+async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
+    """
+    Ingest a document (PDF, MD, CSV, TXT) into the local vector DB.
+    Triggered when a user drags and drops a file into the RAGForge Vault.
+    """
+    state: AppState = get_state(app)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    file_path = state.settings.data_dir / "uploads" / file.filename
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Save file to disk
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        # Vectorize and index in a background thread to avoid blocking the event loop
+        from src.modules.ragforge_indexer import index_document
+        chunks_added = await asyncio.to_thread(index_document, file_path, state.vector_store)
+
+        return JSONResponse({"status": "success", "chunks_indexed": chunks_added})
+    except Exception as e:
+        logger.exception("Failed to process RAG document %s", file.filename)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ── Chat Request / Response models ────────────────────────────────
@@ -329,9 +370,9 @@ async def update_policy(body: dict[str, str]) -> JSONResponse:
 async def trigger_training() -> JSONResponse:
     """
     Manually trigger an OPLoRA fine-tuning run.
-    Used from TuneLab UI or CLI. Checks battery before starting.
+    Used from TuneLab UI or CLI. Bypasses battery/cpu gates.
     """
-    asyncio.create_task(_nightly_oplora_job(app))
+    asyncio.create_task(_nightly_oplora_job(app, force=True))
     return JSONResponse({"status": "triggered", "message": "OPLoRA training job started"})
 
 
@@ -341,6 +382,164 @@ async def replay_stats() -> JSONResponse:
     state: AppState = get_state(app)
     stats = await state.replay_buffer.get_stats()
     return JSONResponse(stats)
+
+
+@app.get("/api/v1/replay/items", tags=["Learning"])
+async def replay_items(limit: int = 50) -> JSONResponse:
+    """Returns the latest N records from the replay buffer for the TuneLab UI."""
+    state: AppState = get_state(app)
+    items = await state.replay_buffer.sample(n=limit, min_faithfulness=0.0, exclude_used=False)
+    # Sort descending by timestamp so newest appear first
+    items.sort(key=lambda x: x.get("timestamp_utc", 0), reverse=True)
+    return JSONResponse(items)
+
+
+@app.get("/api/v1/learning/capacity", tags=["Learning"])
+async def learning_capacity() -> JSONResponse:
+    """Returns the remaining orthogonal capacity for OPLoRA."""
+    state: AppState = get_state(app)
+    from src.learning.oploRA_manager import OPLoRAManager
+    manager = OPLoRAManager(state.settings)
+    manager.load_checkpoints()
+    capacity = manager.estimate_capacity()
+    return JSONResponse({
+        "capacity_pct": round(capacity * 100, 1),
+        "total_tasks": sum(len(v) for v in manager._subspaces.values())
+    })
+
+
+# ── Webhook Ingestion (WatchTower / StreamSync) ───────────────────
+
+class WebhookPayload(BaseModel):
+    """Generic payload for incoming module webhooks."""
+    event: str = "webhook"
+    
+    # Allow arbitrary extra fields for dynamic metrics (cpu, mem, etc.)
+    class Config:
+        extra = "allow"
+
+@app.post("/api/v1/events", tags=["Modules"])
+async def ingest_event(background_tasks: BackgroundTasks, payload: WebhookPayload = Body(...)) -> JSONResponse:
+    """
+    Primary ingestion endpoint for AetherForge modules.
+    - Routes raw webhooks into StreamSync's pattern matcher.
+    - If numeric metrics are found (e.g. "cpu": 85), routes to WatchTower Z-Score math.
+    """
+    payload_dict = payload.dict(exclude_unset=True)
+    
+    from src.modules.streamsync.graph import emit_event
+    from src.modules.watchtower.graph import ingest_metric
+
+    source = payload_dict.pop("_source", "api")
+    event_type = payload_dict.get("event", "webhook")
+
+    # 1. Emit to StreamSync ring buffer
+    event_id = emit_event(event_type=event_type, payload=payload_dict, source=source)
+
+    # 2. Extract numeric metrics for WatchTower Z-Score anomaly detection
+    for key, value in payload_dict.items():
+        if isinstance(value, (int, float)):
+            # Don't block the API response while calculating stats
+            background_tasks.add_task(ingest_metric, key, float(value))
+
+    return JSONResponse({"status": "ingested", "id": event_id})
+
+
+@app.get("/api/v1/events/stream", tags=["Modules"])
+async def stream_events(limit: int = 20) -> JSONResponse:
+    """Returns the latest events from StreamSync for the Event Console UI."""
+    from src.modules.streamsync.graph import _EVENT_STREAM
+    # deque doesn't support slicing directly, convert to list
+    events = list(_EVENT_STREAM)[-limit:]
+    # Return newest first
+    return JSONResponse(events[::-1])
+
+
+@app.get("/api/v1/metrics/stream", tags=["Modules"])
+async def stream_metrics() -> JSONResponse:
+    """Returns the latest sliding-window Z-Scores from WatchTower for the Telemetry UI."""
+    from src.modules.watchtower.graph import _METRIC_WINDOWS, _Z_THRESHOLD
+    import numpy as np
+    
+    current_state = {}
+    for metric, window in _METRIC_WINDOWS.items():
+        if not window:
+            continue
+        latest_val = window[-1]
+        z_score = 0.0
+        is_anomaly = False
+        if len(window) >= 10:
+            arr = np.array(window)
+            mean = float(np.mean(arr))
+            std = float(np.std(arr))
+            if std > 1e-8:
+                z_score = (latest_val - mean) / std
+                is_anomaly = abs(z_score) > _Z_THRESHOLD
+        
+        current_state[metric] = {
+            "value": round(latest_val, 2),
+            "z_score": round(z_score, 2),
+            "is_anomaly": is_anomaly,
+            "window_size": len(window)
+        }
+    
+    return JSONResponse(current_state)
+
+
+class AnalyzeRequest(BaseModel):
+    metric: str
+    value: float
+    z_score: float
+    context_: dict[str, Any] = Field(default_factory=dict, alias="context")
+
+class MitigateRequest(BaseModel):
+    action: str
+    target: str
+
+@app.post("/api/v1/watchtower/analyze", tags=["Modules"])
+async def trigger_rca(req: AnalyzeRequest) -> JSONResponse:
+    """Trigger Root Cause Analysis for a specific anomaly."""
+    state: AppState = get_state(app)
+    from src.rca.root_cause_agent import RootCauseAgent
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    def rca_llm(prompt: str) -> str:
+        # Wrap the MetaAgent's LLM to fit the RCA string->string interface
+        messages = [
+            SystemMessage(content="You are an expert System Administrator performing Root Cause Analysis."),
+            HumanMessage(content=prompt)
+        ]
+        return state.meta_agent._run_llm_sync(messages, max_tokens=150)
+        
+    agent = RootCauseAgent(llm_fn=rca_llm, max_depth=3) # Limit depth for speed
+    issue = f"{req.metric.upper()} anomaly detected: value {req.value:.1f} (Z-Score {req.z_score:.2f})"
+    anomalies = [{"metric": req.metric, "value": req.value, "z_score": req.z_score}]
+    
+    # Run RCA synchronously in a thread so we don't block the ASGI loop
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, 
+        lambda: agent.analyze(issue=issue, context=req.context_, anomalies=anomalies)
+    )
+    return JSONResponse(result.to_dict())
+
+@app.post("/api/v1/watchtower/mitigate", tags=["Modules"])
+async def trigger_mitigation(req: MitigateRequest) -> JSONResponse:
+    """Execute human-in-the-loop mitigation action (simulated syscall)."""
+    logger.info("Executing WatchTower mitigation: action='%s' target='%s'", req.action, req.target)
+    
+    # Simulate syscall execution delay
+    await asyncio.sleep(0.5)
+    
+    # Reset WatchTower baseline metrics to simulate the anomaly being immediately resolved
+    # by the sysadmin's mitigation action.
+    from src.modules.watchtower.graph import _METRIC_WINDOWS
+    if req.action in ["Kill Process", "Restart Module"]:
+        for k in _METRIC_WINDOWS:
+             # Fast drop to prevent lingering anomalies in the frontend sparklines
+            _METRIC_WINDOWS[k].clear()
+            for _ in range(10): _METRIC_WINDOWS[k].append(45.0 if k != 'net' else 12.0)
+            
+    return JSONResponse({"status": "success", "message": f"Action '{req.action}' executed on {req.target}"})
 
 
 # ── WebSocket: Streaming Chat ─────────────────────────────────────
@@ -394,43 +593,42 @@ async def ws_chat(websocket: WebSocket, session_id: str) -> None:
 
 
 # ── Background Jobs ───────────────────────────────────────────────
-async def _nightly_oplora_job(app_: FastAPI) -> None:
+async def _nightly_oplora_job(app_: FastAPI, force: bool = False) -> None:
     """
     Nightly OPLoRA training job. Only runs if:
       - Battery > min_battery_pct (default 30%)
       - System is not under heavy CPU load (< 50%)
-
-    This is called by APScheduler at the configured time, and can
-    also be triggered via POST /api/v1/learning/trigger.
+    Bypassed if force=True.
     """
     state: AppState = get_state(app_)
     settings = state.settings
 
-    # ── Battery gate ──────────────────────────────────────────────
-    battery = psutil.sensors_battery()
-    if battery and not battery.power_plugged:
-        if battery.percent < settings.oploра_min_battery_pct:
-            logger.info(
-                "Nightly OPLoRA skipped: battery %.0f%% < threshold %.0f%%",
-                battery.percent,
-                settings.oploра_min_battery_pct,
-            )
+    if not force:
+        # ── Battery gate ──────────────────────────────────────────────
+        battery = psutil.sensors_battery()
+        if battery and not battery.power_plugged:
+            if battery.percent < settings.oploра_min_battery_pct:
+                logger.info(
+                    "Nightly OPLoRA skipped: battery %.0f%% < threshold %.0f%%",
+                    battery.percent,
+                    settings.oploра_min_battery_pct,
+                )
+                return
+
+        # ── CPU gate ──────────────────────────────────────────────────
+        cpu_load = psutil.cpu_percent(interval=1.0)
+        if cpu_load > 60.0:
+            logger.info("Nightly OPLoRA skipped: CPU at %.0f%%", cpu_load)
             return
 
-    # ── CPU gate ──────────────────────────────────────────────────
-    cpu_load = psutil.cpu_percent(interval=1.0)
-    if cpu_load > 50.0:
-        logger.info("Nightly OPLoRA skipped: CPU at %.0f%%", cpu_load)
-        return
-
-    logger.info("Starting nightly OPLoRA fine-tuning...")
+    logger.info("Starting %sOPLoRA fine-tuning...", "forced " if force else "nightly ")
     try:
         from src.learning.bitnet_trainer import BitNetTrainer
         trainer = BitNetTrainer(settings, state.replay_buffer)
         await trainer.run_oploora_cycle()
-        logger.info("Nightly OPLoRA complete.")
+        logger.info("%sOPLoRA complete.", "Forced " if force else "Nightly ")
     except Exception as exc:
-        logger.exception("Nightly OPLoRA failed: %s", exc)
+        logger.exception("OPLoRA failed: %s", exc)
 
 
 # ── CLI Entry (typer) ─────────────────────────────────────────────

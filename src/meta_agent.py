@@ -45,12 +45,16 @@ def _messages_to_prompt(messages: list[Any]) -> str:
     Convert LangChain messages to ChatML format for llama-cpp.
     BitNet GGUF models use the standard ChatML template.
     """
-    parts = ["<|im_start|>system\n" + _SYSTEM_PROMPT + "<|im_end|>"]
+    parts = []
     for msg in messages:
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, SystemMessage):
+            parts.append(f"<|im_start|>system\n{msg.content}<|im_end|>")
+        elif isinstance(msg, HumanMessage):
             parts.append(f"<|im_start|>user\n{msg.content}<|im_end|>")
         elif isinstance(msg, AIMessage):
             parts.append(f"<|im_start|>assistant\n{msg.content}<|im_end|>")
+            
+    # Add trailing prompt initiator
     parts.append("<|im_start|>assistant\n")
     return "\n".join(parts)
 
@@ -108,9 +112,10 @@ class MetaAgent:
     serialize concurrent requests.
     """
 
-    def __init__(self, settings: AetherForgeSettings, colosseum: SiliconColosseum) -> None:
+    def __init__(self, settings: AetherForgeSettings, colosseum: SiliconColosseum, vector_store: Any = None) -> None:
         self.settings = settings
         self.colosseum = colosseum
+        self.vector_store = vector_store
         self._llm: Any = None
         self._lock = asyncio.Lock()
         self._session_memories: dict[str, list[Any]] = {}
@@ -231,6 +236,31 @@ class MetaAgent:
 
         # Build module-specific system context
         module_context = _MODULE_CONTEXTS.get(module, "")
+        
+        # Inject RAG Context if applicable
+        if module == "ragforge" and self.vector_store:
+            t_rag = time.perf_counter()
+            active_docs = inp.context.get("active_docs", [])
+            filter_kwargs = {}
+            if active_docs:
+                if len(active_docs) == 1:
+                    filter_kwargs["filter"] = {"source": active_docs[0]}
+                else:
+                    filter_kwargs["filter"] = {"source": {"$in": active_docs}}
+
+            docs = self.vector_store.similarity_search(inp.message, k=5, **filter_kwargs)
+            if docs:
+                context_parts = []
+                for i, d in enumerate(docs):
+                    source = d.metadata.get("source", "Unknown")
+                    context_parts.append(f"[{i+1}] Source: {source}\n{d.page_content}")
+                retrieved_text = "\n\nRetrieved Context:\n" + "\n\n".join(context_parts)
+                module_context += retrieved_text
+                _trace("rag_retrieval", {"chunks": len(docs), "latency_ms": (time.perf_counter() - t_rag) * 1000})
+            else:
+                module_context += "\n\nRetrieved Context: No relevant documents found."
+                _trace("rag_retrieval", {"chunks": 0, "latency_ms": (time.perf_counter() - t_rag) * 1000})
+
         messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
 
         # Run LLM
@@ -298,32 +328,64 @@ class MetaAgent:
             # Real streaming via llama-cpp create_completion with stream=True
             memory = self._get_or_create_memory(inp.session_id)
             memory.append(HumanMessage(content=inp.message))
-            prompt = _messages_to_prompt(memory)
+            
+            # Module dispatch and RAG Context
+            VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab"}
+            module = inp.module if inp.module in VALID_MODULES else "localbuddy"
+            module_context = _MODULE_CONTEXTS.get(module, "")
 
-            full_response = []
+            if module == "ragforge" and self.vector_store:
+                active_docs = inp.context.get("active_docs", [])
+                filter_kwargs = {}
+                if active_docs:
+                    if len(active_docs) == 1:
+                        filter_kwargs["filter"] = {"source": active_docs[0]}
+                    else:
+                        filter_kwargs["filter"] = {"source": {"$in": active_docs}}
 
-            def _stream_tokens() -> list[str]:
-                tokens: list[str] = []
-                for tok in self._llm(  # type: ignore[operator]
-                    prompt,
-                    max_tokens=self.settings.bitnet_max_tokens,
-                    temperature=self.settings.bitnet_temperature,
-                    top_p=self.settings.bitnet_top_p,
-                    stop=["<|im_end|>"],
-                    stream=True,
-                ):
-                    tokens.append(tok["choices"][0]["text"])
-                return tokens
+                docs = self.vector_store.similarity_search(inp.message, k=5, **filter_kwargs)
+                if docs:
+                    context_parts = []
+                    for i, d in enumerate(docs):
+                        source = d.metadata.get("source", "Unknown")
+                        context_parts.append(f"[{i+1}] Source: {source}\n{d.page_content}")
+                    retrieved_text = "\n\nRetrieved Context:\n" + "\n\n".join(context_parts)
+                    module_context += retrieved_text
+                else:
+                    module_context += "\n\nRetrieved Context: No relevant documents found."
+
+            messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
+            prompt = _messages_to_prompt(messages_with_context)
+
+            queue = asyncio.Queue()
+            
+            def _producer():
+                try:
+                    for tok in self._llm(
+                        prompt,
+                        max_tokens=self.settings.bitnet_max_tokens,
+                        temperature=self.settings.bitnet_temperature,
+                        top_p=self.settings.bitnet_top_p,
+                        stop=["<|im_end|>"],
+                        stream=True,
+                    ):
+                        # Use threadsafe put_nowait so we can push to the async queue from this thread
+                        asyncio.run_coroutine_threadsafe(queue.put(tok["choices"][0]["text"]), loop)
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
             loop = asyncio.get_event_loop()
-            tokens = await loop.run_in_executor(None, _stream_tokens)
+            task = loop.run_in_executor(None, _producer)
 
-            for tok in tokens:
+            full_response = []
+            while True:
+                tok = await queue.get()
+                if tok is None:
+                    break
                 full_response.append(tok)
                 yield {"type": "token", "content": tok}
-
-            full_text = "".join(full_response)
-            memory.append(AIMessage(content=full_text))
+                
+            memory.append(AIMessage(content="".join(full_response)))
 
 
 # ── Module Context Strings ────────────────────────────────────────

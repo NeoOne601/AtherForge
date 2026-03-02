@@ -307,7 +307,7 @@ class OPLoRAManager:
         """Persist a TaskKnowledgeSubspace to disk as .npz."""
         filename = f"{subspace.task_id}_{subspace.layer_key.replace('.', '_')}.npz"
         path = self._checkpoint_dir / filename
-        np.savez_compressed(
+        np.savez(
             path,
             task_id=subspace.task_id,
             layer_key=subspace.layer_key,

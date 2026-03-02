@@ -75,6 +75,9 @@ dependencies = [
   "apscheduler>=3.10.0",    # Nightly OPLoRA scheduler
   "psutil>=6.0.0",          # Battery / CPU load detection
   "aiofiles>=23.2.0",
+  "sentence-transformers>=3.0.0", # Local CPU embeddings
+  "pypdf>=4.2.0",           # PDF parsing for RAGForge
+  "python-multipart>=0.0.9", # Required by FastAPI for File uploads
 ]
 
 [project.optional-dependencies]
