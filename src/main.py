@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Meta-agent ready | modules=5 | model=%s", settings.bitnet_model_path.name)
 
     # ── 5. Start nightly OPLoRA scheduler ─────────────────────────
-    state.scheduler = AsyncIOScheduler(timezone="local")
+    state.scheduler = AsyncIOScheduler(timezone="UTC")
     state.scheduler.add_job(
         _nightly_oplora_job,
         trigger=CronTrigger(
