@@ -1,0 +1,298 @@
+/* AetherForge v1.0 — frontend/src/index.css */
+/* Global design system: deep-space dark UI with glassmorphism */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-primary: #020408;
+    --bg-secondary: #050c14;
+    --bg-surface: #0a1628;
+    --bg-elevated: #0f2040;
+    --border-subtle: rgba(56, 114, 212, 0.15);
+    --border-active: rgba(139, 92, 246, 0.6);
+    --text-primary: #e8eef8;
+    --text-secondary: #8da4c8;
+    --text-muted: #4a6080;
+    --accent-volt: #8b5cf6;
+    --accent-plasma: #22d3ee;
+    --accent-ember: #fb923c;
+    --accent-safe: #34d399;
+    --accent-danger: #f87171;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: "Inter", system-ui, sans-serif;
+    line-height: 1.6;
+    overflow: hidden; /* Tauri app — no page scroll */
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(139, 92, 246, 0.3);
+    border-radius: 2px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(139, 92, 246, 0.6);
+  }
+
+  ::selection {
+    background: rgba(139, 92, 246, 0.4);
+    color: #fff;
+  }
+}
+
+@layer components {
+  /* ── Glass panel — core UI primitive ─────────────────────────── */
+  .glass {
+    @apply rounded-xl border backdrop-blur-md;
+    background: rgba(10, 22, 40, 0.7);
+    border-color: var(--border-subtle);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .glass-active {
+    @apply glass;
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.3), 0 4px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────── */
+  .btn-primary {
+    @apply px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200;
+    background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+    color: #fff;
+    border: 1px solid rgba(139, 92, 246, 0.5);
+  }
+
+  .btn-primary:hover {
+    background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+    box-shadow: 0 0 20px rgba(139, 92, 246, 0.4);
+    transform: translateY(-1px);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0);
+  }
+
+  .btn-ghost {
+    @apply px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .btn-ghost:hover {
+    color: var(--text-primary);
+    border-color: var(--border-active);
+    background: rgba(139, 92, 246, 0.08);
+  }
+
+  /* ── Inputs ───────────────────────────────────────────────────── */
+  .input-field {
+    @apply w-full px-4 py-3 rounded-lg text-sm outline-none transition-all duration-200;
+    background: rgba(5, 12, 20, 0.8);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .input-field:focus {
+    border-color: var(--accent-volt);
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
+  }
+
+  .input-field::placeholder {
+    color: var(--text-muted);
+  }
+
+  /* ── Badges ───────────────────────────────────────────────────── */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-volt {
+    @apply badge;
+    background: rgba(139, 92, 246, 0.15);
+    color: var(--accent-volt);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+  }
+
+  .badge-safe {
+    @apply badge;
+    background: rgba(52, 211, 153, 0.12);
+    color: var(--accent-safe);
+    border: 1px solid rgba(52, 211, 153, 0.3);
+  }
+
+  .badge-danger {
+    @apply badge;
+    background: rgba(248, 113, 113, 0.12);
+    color: var(--accent-danger);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+  }
+
+  .badge-plasma {
+    @apply badge;
+    background: rgba(34, 211, 238, 0.1);
+    color: var(--accent-plasma);
+    border: 1px solid rgba(34, 211, 238, 0.3);
+  }
+
+  /* ── Status indicator dot ─────────────────────────────────────── */
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+
+  .status-dot.online {
+    background: var(--accent-safe);
+    box-shadow: 0 0 6px var(--accent-safe);
+    animation: pulse-slow 2s infinite;
+  }
+
+  .status-dot.offline {
+    background: var(--accent-danger);
+  }
+
+  .status-dot.loading {
+    background: var(--accent-ember);
+    animation: pulse-slow 1s infinite;
+  }
+
+  /* ── Code blocks ──────────────────────────────────────────────── */
+  .code-block {
+    @apply font-mono text-xs rounded-lg p-4 overflow-x-auto;
+    background: rgba(2, 4, 8, 0.9);
+    border: 1px solid var(--border-subtle);
+    color: #a0bfef;
+  }
+
+  /* ── Animated underline for tabs ─────────────────────────────── */
+  .tab-active {
+    color: var(--text-primary) !important;
+    position: relative;
+  }
+
+  .tab-active::after {
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #8b5cf6, #22d3ee);
+    border-radius: 1px;
+  }
+
+  /* ── Gradient text ────────────────────────────────────────────── */
+  .gradient-text {
+    background: linear-gradient(135deg, #a78bfa, #22d3ee);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* ── Glow effects ─────────────────────────────────────────────── */
+  .glow-volt {
+    box-shadow: 0 0 20px rgba(139, 92, 246, 0.3), 0 0 40px rgba(139, 92, 246, 0.1);
+  }
+
+  .glow-plasma {
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
+  }
+
+  /* ── Sidebar item ─────────────────────────────────────────────── */
+  .sidebar-item {
+    @apply flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 text-sm;
+    color: var(--text-secondary);
+  }
+
+  .sidebar-item:hover {
+    color: var(--text-primary);
+    background: rgba(139, 92, 246, 0.08);
+  }
+
+  .sidebar-item.active {
+    color: var(--text-primary);
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+  }
+
+  /* ── Chat message bubbles ─────────────────────────────────────── */
+  .msg-user {
+    @apply px-4 py-3 rounded-2xl rounded-br-sm text-sm max-w-[80%] ml-auto;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(109, 40, 217, 0.2));
+    border: 1px solid rgba(139, 92, 246, 0.3);
+  }
+
+  .msg-assistant {
+    @apply px-4 py-3 rounded-2xl rounded-bl-sm text-sm max-w-[85%];
+    background: rgba(10, 22, 40, 0.8);
+    border: 1px solid var(--border-subtle);
+  }
+
+  /* ── Loading spinner ──────────────────────────────────────────── */
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(139, 92, 246, 0.2);
+    border-top-color: var(--accent-volt);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* ── Typing indicator ────────────────────────────────────────── */
+  .typing-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-volt);
+    animation: typing 1.2s infinite;
+  }
+
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes typing {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-8px); opacity: 1; }
+  }
+}
+
+@layer utilities {
+  .text-muted { color: var(--text-muted); }
+  .text-secondary { color: var(--text-secondary); }
+  .border-subtle { border-color: var(--border-subtle); }
+  .bg-surface { background-color: var(--bg-surface); }
+  .bg-elevated { background-color: var(--bg-elevated); }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
