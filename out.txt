@@ -1,0 +1,4 @@
+--- GENERATING T=0.0 ---
+'```json\n{"tool_name": "trigger_compilation", "arguments": {}}\n```'
+--- GENERATING T=0.1 ---
+'```json\n{"tool_name": "trigger_compilation", "arguments": {}}\n```'
