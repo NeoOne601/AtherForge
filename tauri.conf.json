@@ -45,11 +45,7 @@
             "minimumSystemVersion": "12.0",
             "signingIdentity": null,
             "providerShortName": null,
-            "frameworks": [],
-            "infoPlist": {
-                "NSMicrophoneUsageDescription": "AetherForge uses microphone for voice commands",
-                "NSCameraUsageDescription": "AetherForge does not use the camera"
-            }
+            "frameworks": []
         }
     },
     "plugins": {

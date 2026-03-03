@@ -44,12 +44,38 @@ const MODULES: Module[] = [
     { id: "tunelab", name: "TuneLab", icon: "🎛️", desc: "Fine-tuning control" },
 ];
 
-const SUGGESTIONS = [
-    "Summarise how OPLoRA prevents catastrophic forgetting",
-    "What modules does AetherForge have?",
-    "Analyse this data for anomalies: 12, 14, 13, 98, 15, 12",
-    "How does the Silicon Colosseum protect my data?",
-];
+const MODULE_SUGGESTIONS: Record<string, string[]> = {
+    localbuddy: [
+        "Summarise how OPLoRA prevents catastrophic forgetting",
+        "What modules does AetherForge have?",
+        "How does the Silicon Colosseum protect my data?",
+        "What is BitNet and how does it run locally?",
+    ],
+    ragforge: [
+        "What documents have I uploaded?",
+        "Summarise the key points from my latest document",
+        "Find anything related to OPLoRA in my documents",
+        "What are the main topics in the knowledge base?",
+    ],
+    watchtower: [
+        "Why is memory usage so high?",
+        "What process is using the most CPU?",
+        "Show me the current memory stats",
+        "Are there any active anomalies right now?",
+    ],
+    streamsync: [
+        "Show me the recent event stream",
+        "Summarise what's in the stream",
+        "What sources are sending events?",
+        "Clear the event buffer",
+    ],
+    tunelab: [
+        "How many samples are ready for training?",
+        "Trigger the OPLoRA compilation cycle",
+        "What is the current replay buffer status?",
+        "How full is the training queue?",
+    ],
+};
 
 // ── Main App ─────────────────────────────────────────────────────
 export default function App() {
@@ -310,18 +336,13 @@ function WatchTowerHUD() {
 
     const injectAnomaly = async () => {
         try {
-            await fetch("/api/v1/events", {
+            // Inject an extreme value via the dedicated WatchTower endpoint.
+            // This will be clearly anomalous against the psutil-calibrated baseline.
+            await fetch("/api/v1/watchtower/inject_anomaly", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    mem: 95.0 + (Math.random() * 5),
-                    cpu: 45.0,
-                    net: 12.0,
-                    event: "simulate_spike",
-                    _source: "WatchTower UI"
-                })
+                body: JSON.stringify({ metric: "mem", value: 99.5 })
             });
-            // Removed alert so it's less intrusive
         } catch (err) {
             console.error("Failed to inject anomaly", err);
         }
@@ -824,7 +845,7 @@ function ChatPanel({ module, xray }: { module: string; xray: boolean; onXrayData
                         <div className="empty-title">Welcome to {mod.name}</div>
                         <div className="empty-sub">{mod.desc} — fully local, zero cloud, perpetually learning.</div>
                         <div className="suggestion-chips">
-                            {SUGGESTIONS.map((s, i) => (
+                            {(MODULE_SUGGESTIONS[module] || MODULE_SUGGESTIONS.localbuddy).map((s, i) => (
                                 <button key={i} className="chip" onClick={() => { setInput(s); textareaRef.current?.focus(); }}>
                                     {s}
                                 </button>

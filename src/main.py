@@ -16,6 +16,24 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
+# ── Model cache redirect — MUST be set before any HuggingFace/torch import ──
+# Redirects ALL model downloads to the external drive so the iMac internal
+# SSD is not consumed by large model files. Reads HF_HOME from environment
+# (set in .env / run_dev.sh) with a fallback to the known external volume.
+import os as _os
+_EXTERNAL_AI_DRIVE = _os.environ.get(
+    "HF_HOME",
+    "/Volumes/Apple/AI Model/hf_cache"
+)
+_hf_hub = f"{_EXTERNAL_AI_DRIVE}/hub"
+_os.environ.setdefault("HF_HOME",                        _EXTERNAL_AI_DRIVE)
+_os.environ.setdefault("HF_HUB_CACHE",                   _hf_hub)
+_os.environ.setdefault("TRANSFORMERS_CACHE",              _hf_hub)
+_os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME",      f"{_EXTERNAL_AI_DRIVE}/sentence_transformers")
+_os.environ.setdefault("TORCH_HOME",                     f"{_EXTERNAL_AI_DRIVE}/torch")
+_os.environ.setdefault("DOCLING_CACHE_DIR",              f"{_EXTERNAL_AI_DRIVE}/docling")
+# ─────────────────────────────────────────────────────────────────
+
 import asyncio
 import logging
 import time
@@ -83,14 +101,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await state.replay_buffer.initialize()
     logger.info("Replay buffer ready at %s", settings.replay_buffer_path)
 
-    # ── 2.5 Initialise local Vector Store (ChromaDB) ──────────────
-    logger.info("Initializing ChromaDB and local sentence-transformers...")
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    state.vector_store = Chroma(
-        persist_directory=str(settings.chroma_path), 
-        embedding_function=embeddings
+    # ── 2.5 Initialise local Vector Store (ChromaDB + BGE-M3) ─────
+    # BAAI/bge-m3 replaces all-MiniLM-L6-v2:
+    #   - 8192 token limit (vs 512) — full PDF sections fit in one vector
+    #   - 1024 dimensions (vs 384) — richer semantic space for academic text
+    #   - Dense + Sparse + Multi-vector unified model (best retrieval accuracy)
+    #   - Fully offline, ~570MB, Apache 2.0
+    logger.info("Initializing ChromaDB with BAAI/bge-m3 embeddings...")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-m3",
+        model_kwargs={"device": "cpu"},          # works on any machine, MPS auto-detected
+        encode_kwargs={"normalize_embeddings": True},  # required for cosine similarity
     )
-    logger.info("ChromaDB active at %s", settings.chroma_path)
+    state.vector_store = Chroma(
+        persist_directory=str(settings.chroma_path),
+        embedding_function=embeddings,
+    )
+    logger.info("ChromaDB active at %s | model=bge-m3 | dims=1024 | max_tokens=8192",
+                settings.chroma_path)
 
     # ── 3. Initialise Silicon Colosseum (OPA + FSM) ───────────────
     state.colosseum = SiliconColosseum(settings)
@@ -98,7 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Silicon Colosseum guardrails active | mode=%s", settings.opa_mode)
 
     # ── 4. Initialise LangGraph Meta-Agent (loads BitNet model) ───
-    state.meta_agent = MetaAgent(settings, state.colosseum, state.vector_store)
+    state.meta_agent = MetaAgent(settings, state.colosseum, state.vector_store, state.replay_buffer)
     await state.meta_agent.initialize()
     logger.info("Meta-agent ready | modules=5 | model=%s", settings.bitnet_model_path.name)
 
@@ -125,10 +153,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     state.startup_ms = (time.perf_counter() - t0) * 1000
     logger.info("AetherForge startup complete in %.1f ms", state.startup_ms)
 
+    # ── 6. Start WatchTower live metric poller (psutil every 2s) ──────
+    _poller_task = asyncio.create_task(_watchtower_poller())
+    logger.info("WatchTower psutil poller started")
+
     yield  # ← Application runs here
 
-    # ── Shutdown ──────────────────────────────────────────────────
+    # ── Shutdown ──────────────────────────────────────────
     logger.info("AetherForge shutting down...")
+    _poller_task.cancel()
     state.scheduler.shutdown(wait=False)
     await state.replay_buffer.flush()
     logger.info("Shutdown complete.")
@@ -161,6 +194,41 @@ app.add_middleware(
 # ── Helper ────────────────────────────────────────────────────────
 def get_state(app_: Any) -> AppState:
     return app_.state.app_state  # type: ignore[no-any-return]
+
+
+# ── WatchTower Live Metric Poller ─────────────────────────────
+async def _watchtower_poller() -> None:
+    """
+    Background task: polls psutil every 2 seconds and feeds real CPU,
+    memory, and network throughput into WatchTower's metric windows.
+    This is what populates the telemetry dashboard automatically without
+    requiring external webhooks.
+    """
+    from src.modules.watchtower.graph import ingest_metric
+    net_prev = psutil.net_io_counters()
+    prev_time = time.perf_counter()
+    try:
+        while True:
+            await asyncio.sleep(2)
+            try:
+                cpu_pct = psutil.cpu_percent(interval=None)
+                mem_pct = psutil.virtual_memory().percent
+                # Network throughput in MB/s
+                net_curr = psutil.net_io_counters()
+                curr_time = time.perf_counter()
+                elapsed = max(curr_time - prev_time, 0.001)
+                net_mb = (net_curr.bytes_sent + net_curr.bytes_recv -
+                          net_prev.bytes_sent - net_prev.bytes_recv) / (elapsed * 1024 * 1024)
+                net_prev = net_curr
+                prev_time = curr_time
+
+                ingest_metric("cpu", cpu_pct)
+                ingest_metric("mem", mem_pct)
+                ingest_metric("net", round(net_mb, 2))
+            except Exception as e:
+                logger.warning("WatchTower poller tick failed: %s", e)
+    except asyncio.CancelledError:
+        logger.info("WatchTower poller stopped")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -220,9 +288,24 @@ async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
 
         # Vectorize and index in a background thread to avoid blocking the event loop
         from src.modules.ragforge_indexer import index_document
-        chunks_added = await asyncio.to_thread(index_document, file_path, state.vector_store)
+        result = await asyncio.to_thread(index_document, file_path, state.vector_store)
 
-        return JSONResponse({"status": "success", "chunks_indexed": chunks_added})
+        # result is a dict: {file, chunks_added, parser, chunk_breakdown}
+        chunks_added = result.get("chunks_added", 0) if isinstance(result, dict) else int(result)
+        parser = result.get("parser", "unknown") if isinstance(result, dict) else "legacy"
+        breakdown = result.get("chunk_breakdown", {}) if isinstance(result, dict) else {}
+
+        logger.info(
+            "Indexed '%s' — %d chunks via %s | breakdown=%s",
+            file.filename, chunks_added, parser, breakdown,
+        )
+        return JSONResponse({
+            "status": "success",
+            "chunks_indexed": chunks_added,
+            "parser": parser,
+            "chunk_breakdown": breakdown,
+            "file": file.filename,
+        })
     except Exception as e:
         logger.exception("Failed to process RAG document %s", file.filename)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -484,6 +567,30 @@ async def stream_metrics() -> JSONResponse:
         }
     
     return JSONResponse(current_state)
+
+
+class InjectAnomalyRequest(BaseModel):
+    metric: str = "mem"
+    value: float = 99.5
+
+@app.post("/api/v1/watchtower/inject_anomaly", tags=["Modules"])
+async def inject_anomaly(req: InjectAnomalyRequest) -> JSONResponse:
+    """
+    Inject an artificial spike into WatchTower for demo/testing purposes.
+    Called by the ‘⚠️ Simulate Memory Spike’ button in the frontend.
+    """
+    from src.modules.watchtower.graph import ingest_metric
+    result = ingest_metric(req.metric, req.value)
+    logger.info("Manual anomaly injected: %s=%.2f | anomaly=%s z=%.2f",
+                req.metric, req.value, result["is_anomaly"], result["z_score"])
+    return JSONResponse({
+        "status": "injected",
+        "metric": req.metric,
+        "value": req.value,
+        "is_anomaly": result["is_anomaly"],
+        "z_score": result["z_score"],
+        "baseline_locked": result.get("baseline_locked", False),
+    })
 
 
 class AnalyzeRequest(BaseModel):

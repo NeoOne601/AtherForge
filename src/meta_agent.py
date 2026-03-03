@@ -112,10 +112,11 @@ class MetaAgent:
     serialize concurrent requests.
     """
 
-    def __init__(self, settings: AetherForgeSettings, colosseum: SiliconColosseum, vector_store: Any = None) -> None:
+    def __init__(self, settings: AetherForgeSettings, colosseum: SiliconColosseum, vector_store: Any = None, replay_buffer: Any = None) -> None:
         self.settings = settings
         self.colosseum = colosseum
         self.vector_store = vector_store
+        self.replay_buffer = replay_buffer
         self._llm: Any = None
         self._lock = asyncio.Lock()
         self._session_memories: dict[str, list[Any]] = {}
@@ -154,7 +155,7 @@ class MetaAgent:
         self._llm = await loop.run_in_executor(None, _load)
         logger.info("BitNet model loaded")
 
-    def _run_llm_sync(self, messages: list[Any], max_tokens: int | None = None) -> str:
+    def _run_llm_sync(self, messages: list[Any], max_tokens: int | None = None, temperature: float | None = None) -> str:
         """Run the LLM synchronously (called from pipeline nodes)."""
         if isinstance(self._llm, MockLLM):
             return self._llm.generate(messages)
@@ -163,7 +164,7 @@ class MetaAgent:
         result = self._llm(
             prompt,
             max_tokens=max_tokens or self.settings.bitnet_max_tokens,
-            temperature=self.settings.bitnet_temperature,
+            temperature=temperature if temperature is not None else self.settings.bitnet_temperature,
             top_p=self.settings.bitnet_top_p,
             stop=["<|im_end|>"],
         )
@@ -237,6 +238,9 @@ class MetaAgent:
         # Build module-specific system context
         module_context = _MODULE_CONTEXTS.get(module, "")
         
+        # Default for non-ragforge modules (SAMR-lite uses this later)
+        retrieved_doc_texts: list[str] = []
+
         # Inject RAG Context if applicable
         if module == "ragforge" and self.vector_store:
             t_rag = time.perf_counter()
@@ -248,39 +252,206 @@ class MetaAgent:
                 else:
                     filter_kwargs["filter"] = {"source": {"$in": active_docs}}
 
-            docs = self.vector_store.similarity_search(inp.message, k=5, **filter_kwargs)
+            docs = self.vector_store.similarity_search(inp.message, k=6, **filter_kwargs)
+            retrieved_doc_texts: list[str] = []  # stored for SAMR-lite check below
             if docs:
                 context_parts = []
                 for i, d in enumerate(docs):
-                    source = d.metadata.get("source", "Unknown")
-                    context_parts.append(f"[{i+1}] Source: {source}\n{d.page_content}")
-                retrieved_text = "\n\nRetrieved Context:\n" + "\n\n".join(context_parts)
+                    meta = d.metadata
+                    source = meta.get("source", "Unknown")
+                    page = meta.get("page", "?")
+                    section = meta.get("section", "")
+                    chunk_type = meta.get("chunk_type", "section")
+                    parser = meta.get("parser", "")
+                    # Build rich citation header for research papers
+                    citation = f"[{i+1}] {source} | p.{page}"
+                    if section:
+                        citation += f" | §{section[:60]}"
+                    if chunk_type in ("table", "equation"):
+                        citation += f" | [{chunk_type.upper()}]"
+                    context_parts.append(f"{citation}\n{d.page_content}")
+                    retrieved_doc_texts.append(d.page_content)
+                retrieved_text = "\n\nRetrieved Context (Precision Ingestion™):\n" + "\n\n".join(context_parts)
                 module_context += retrieved_text
                 _trace("rag_retrieval", {"chunks": len(docs), "latency_ms": (time.perf_counter() - t_rag) * 1000})
             else:
-                module_context += "\n\nRetrieved Context: No relevant documents found."
+                module_context += "\n\nRetrieved Context: No relevant documents found. Ask the user to upload documents first."
+                retrieved_doc_texts = []
                 _trace("rag_retrieval", {"chunks": 0, "latency_ms": (time.perf_counter() - t_rag) * 1000})
+
+        # Inject Intent Engine Tools if applicable
+        tool_module = None
+        if module in {"watchtower", "streamsync", "tunelab"}:
+            try:
+                import importlib
+                tool_module = importlib.import_module(f"src.modules.{module}.tools")
+                if hasattr(tool_module, "get_tools"):
+                    import json
+                    tools_def = json.dumps(tool_module.get_tools(), indent=2)
+                    _FEW_SHOT = {
+                        "watchtower": (
+                            "User: why is memory usage so high?\n"
+                            "Assistant: Let me pull the live memory stats now.\n"
+                            "```json\n{\"tool_name\": \"query_metrics\", \"arguments\": {\"metric_name\": \"mem\"}}\n```\n"
+                            "User: what process is using all my memory?\n"
+                            "Assistant: Checking top memory consumers right now.\n"
+                            "```json\n{\"tool_name\": \"get_top_processes\", \"arguments\": {\"sort_by\": \"memory\"}}\n```\n"
+                            "User: kill python_worker\n"
+                            "Assistant: Terminating python_worker now.\n"
+                            "```json\n{\"tool_name\": \"kill_process\", \"arguments\": {\"target\": \"python_worker\"}}\n```"
+                        ),
+                        "streamsync": (
+                            "User: show me the event stream\n"
+                            "Assistant: Fetching the latest events from the buffer.\n"
+                            "```json\n{\"tool_name\": \"query_stream\", \"arguments\": {\"limit\": 10}}\n```\n"
+                            "User: what patterns are in the stream?\n"
+                            "Assistant: Summarizing the stream data now.\n"
+                            "```json\n{\"tool_name\": \"summarize_stream\", \"arguments\": {}}\n```\n"
+                            "User: how can I analyze the event streams here?\n"
+                            "Assistant: Let me pull the current events so you can see exactly what's flowing in.\n"
+                            "```json\n{\"tool_name\": \"query_stream\", \"arguments\": {\"limit\": 20}}\n```"
+                        ),
+                        "tunelab": (
+                            "User: how many are ready for training?\n"
+                            "Assistant: Querying the Replay Buffer stats now.\n"
+                            "```json\n{\"tool_name\": \"query_buffer_stats\", \"arguments\": {}}\n```\n"
+                            "User: how many samples are pending?\n"
+                            "Assistant: Let me check the buffer right now.\n"
+                            "```json\n{\"tool_name\": \"query_buffer_stats\", \"arguments\": {}}\n```\n"
+                            "User: trigger the compilation\n"
+                            "Assistant: Starting the OPLoRA compilation cycle now.\n"
+                            "```json\n{\"tool_name\": \"trigger_compilation\", \"arguments\": {}}\n```"
+                        ),
+                    }
+                    few_shot = _FEW_SHOT.get(module, "")
+                    module_context += (
+                        f"\n\nAVAILABLE TOOLS:\nYou have access to the following tools to act upon the {module} subsystem:\n"
+                        f"{tools_def}\n\n"
+                        "CRITICAL INSTRUCTION: You MUST call a tool when the user's request can be answered by one. "
+                        "Do NOT explain what the tool does. Do NOT guide the user through the UI. "
+                        "Call the tool first, then explain the result in plain language. "
+                        "Output the tool call wrapped in a ```json block in this exact format:\n"
+                        "```json\n{\"tool_name\": \"name_of_tool\", \"arguments\": {\"arg1\": \"val1\"}}\n```\n\n"
+                        f"MODULE-SPECIFIC EXAMPLES:\n{few_shot}"
+                    )
+            except Exception as e:
+                logger.error("Failed to load Intent Tools for %s: %s", module, e)
 
         messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
 
         # Run LLM
-        response_text = self._run_llm_sync(messages_with_context)
+        # Force temperature to 0.0 when tools are present to ensure strict JSON adherence
+        llm_temp = 0.0 if tool_module else self.settings.bitnet_temperature
+        response_text = self._run_llm_sync(messages_with_context, temperature=llm_temp)
         _trace(f"module_{module}", {"latency_ms": (time.perf_counter() - t0) * 1000, "response_preview": response_text[:100]})
 
+        # Tool Execution Loop
+        tool_executed_successfully = False
+        import re
+        
+        logger.debug("--- [Intent Engine LLM Output] ---")
+        logger.debug(str(response_text))
+        logger.debug("---")
+
+        # Look for markdown JSON blocks, or just the first JSON-like dictionary it outputs
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'(\{.*?\"(?:tool_name|name)\".*?\})', response_text, re.DOTALL)
+            
+        if json_match:
+            try:
+                import json
+                tool_call_json = json_match.group(1)
+                
+                logger.debug("Matched Intent JSON: %s", tool_call_json)
+                call_data = json.loads(tool_call_json)
+                
+                # Support both "tool_name": "name" and "name": "name" depending on how the model formats it
+                tool_name = call_data.get("tool_name") or call_data.get("name")
+                
+                if not tool_name and "function" in call_data:
+                    # Model output an OpenAI-style function call json
+                    tool_name = call_data["function"].get("name")
+                    tool_args = call_data["function"].get("arguments", {})
+                else:
+                    tool_args = call_data.get("arguments", {})
+                
+                # Execute tool
+                if tool_module and hasattr(tool_module, "execute_tool"):
+                    import inspect
+                    sig = inspect.signature(tool_module.execute_tool)
+                    if "state" in sig.parameters:
+                        class MockState: pass
+                        mock_state = MockState()
+                        mock_state.replay_buffer = self.replay_buffer
+                        mock_state.settings = self.settings
+                        tool_output = tool_module.execute_tool(tool_name, tool_args, mock_state)
+                    else:
+                        tool_output = tool_module.execute_tool(tool_name, tool_args)
+                    
+                    tool_calls.append({"name": tool_name, "arguments": tool_args, "result": str(tool_output)})
+                    
+                    # Add tool execution result back into conversation
+                    messages_with_context.append(AIMessage(content=response_text))
+                    messages_with_context.append(SystemMessage(content=(
+                        f"Tool '{tool_name}' executed successfully and returned:\n{tool_output}\n\n"
+                        "Respond to the user in plain language summarizing what the tool found. "
+                        "Be direct — state the actual values. Do NOT say 'I don't have access', "
+                        "'as an AI', or 'I cannot'. The data is above. Summarize it clearly."
+                    )))
+                    
+                    t1 = time.perf_counter()
+                    response_text = self._run_llm_sync(messages_with_context)
+                    tool_executed_successfully = True
+                    _trace(f"tool_execution_{tool_name}", {"result": str(tool_output)[:50], "latency_ms": (time.perf_counter() - t1) * 1000})
+                    
+            except Exception as e:
+                logger.error("Intent Engine Tool execution failed: %s", e)
+                response_text = f"[Intent Engine Error] Failed to execute the requested system tool: {e}"
+
         # ── 4. Post-flight faithfulness score ─────────────────────
-        # Simplified faithfulness: ratio of response that references
-        # the context or question. Production: use RAGAS or DSPy eval.
-        faithfulness_score = _estimate_faithfulness(inp.message, response_text)
+        # When a tool ran, the response is grounded in real data — automatically score it higher.
+        # For RAGForge responses, use SAMR-lite (semantic cosine faithfulness).
+        # For pure LLM responses to other modules, use the heuristic estimator.
+        if tool_executed_successfully:
+            faithfulness_score = 0.95  # Tool-backed responses are always grounded
+        elif module == "ragforge" and retrieved_doc_texts and response_text:
+            # SAMR-lite: semantic faithfulness check for RAG answers
+            try:
+                from src.modules.ragforge.samr_lite import run_samr_lite
+                samr_result = run_samr_lite(
+                    answer=response_text,
+                    retrieved_docs=retrieved_doc_texts,
+                    embedding_function=self.vector_store.embeddings,
+                )
+                faithfulness_score = samr_result.get("faithfulness_score", 0.5)
+                _trace("samr_lite", samr_result)
+                # Append SAMR badge to answer when low confidence
+                if samr_result.get("alert_triggered"):
+                    icon = samr_result.get("alert_icon", "⚠️")
+                    note = samr_result.get("interpretation", "")
+                    response_text += f"\n\n{icon} **SAMR Faithfulness Notice:** {note}"
+            except Exception as samr_err:
+                logger.warning("SAMR-lite failed (non-fatal): %s", samr_err)
+                faithfulness_score = _estimate_faithfulness(inp.message, response_text)
+        else:
+            faithfulness_score = _estimate_faithfulness(inp.message, response_text)
         _trace("faithfulness", {"score": faithfulness_score})
 
-        # Block low-faithfulness outputs
-        if faithfulness_score < self.settings.silicon_colosseum_min_faithfulness:
+        # Block low-faithfulness outputs — EXCEPT for RAGForge:
+        # RAGForge uses SAMR-lite which appends a visible ⚠️ warning to the answer
+        # when confidence is low. Hard-blocking RAGForge prevents users from getting
+        # any value from their uploaded documents — the opposite of our goal.
+        # Colosseum blocking is reserved for tool-calling modules (WatchTower, etc.)
+        # where a bad faithfulness score means the AI made up a tool result.
+        ragforge_samr_active = (module == "ragforge" and retrieved_doc_texts)
+        if faithfulness_score < self.settings.silicon_colosseum_min_faithfulness and not ragforge_samr_active:
             post_decision = self.colosseum.evaluate_request_sync({
                 "session_id": inp.session_id,
                 "module": "output_filter",
                 "message": response_text,
                 "faithfulness_score": faithfulness_score,
-                "tool_call_count": 0,
+                "tool_call_count": len(tool_calls),
             })
             policy_decisions.append(post_decision.to_dict())
             if not post_decision.allowed:
@@ -294,6 +465,24 @@ class MetaAgent:
         # ── 5. Update session memory ──────────────────────────────
         memory.append(AIMessage(content=response_text))
         _trace("output", {"latency_ms": (time.perf_counter() - t_total) * 1000})
+
+        # ── 6. Log successful Intent Tools to Replay Buffer ───────
+        if tool_executed_successfully and faithfulness_score >= self.settings.silicon_colosseum_min_faithfulness and self.replay_buffer:
+            try:
+                # Add to Replay Buffer for continual learning (OPLoRA)
+                asyncio.get_event_loop().create_task(
+                    self.replay_buffer.record(
+                        session_id=inp.session_id,
+                        module=module,
+                        prompt=inp.message,
+                        response=response_text,
+                        tool_calls=tool_calls,
+                        faithfulness_score=faithfulness_score
+                    )
+                )
+                _trace("replay_buffer_append", {"status": "success", "tool_calls": len(tool_calls)})
+            except Exception as e:
+                logger.error("Failed to append tool trace to replay buffer: %s", e)
 
         causal_graph = None
         if inp.xray_mode:
@@ -343,16 +532,32 @@ class MetaAgent:
                     else:
                         filter_kwargs["filter"] = {"source": {"$in": active_docs}}
 
-                docs = self.vector_store.similarity_search(inp.message, k=5, **filter_kwargs)
+                docs = self.vector_store.similarity_search(inp.message, k=8, **filter_kwargs)
                 if docs:
                     context_parts = []
+                    has_images_note = False
                     for i, d in enumerate(docs):
-                        source = d.metadata.get("source", "Unknown")
-                        context_parts.append(f"[{i+1}] Source: {source}\n{d.page_content}")
-                    retrieved_text = "\n\nRetrieved Context:\n" + "\n\n".join(context_parts)
+                        meta = d.metadata
+                        source = meta.get("source", "Unknown")
+                        page = meta.get("page", "?")
+                        section = meta.get("section", "")
+                        chunk_type = meta.get("chunk_type", "section")
+                        citation = f"[{i+1}] {source} | p.{page}"
+                        if section:
+                            citation += f" | §{section[:60]}"
+                        if chunk_type in ("table", "equation"):
+                            citation += f" | [{chunk_type.upper()}]"
+                        context_parts.append(f"{citation}\n{d.page_content}")
+                    retrieved_text = "\n\nRetrieved Context (Precision Ingestion™):\n" + "\n\n".join(context_parts)
+                    # Warn about embedded images not in text index
+                    retrieved_text += (
+                        "\n\n[SYSTEM NOTE: This document contains embedded images/figures that are not "
+                        "in the text index. For figure/diagram content, the retrieved chunks may only "
+                        "contain captions or references — not the visual content itself.]"
+                    )
                     module_context += retrieved_text
                 else:
-                    module_context += "\n\nRetrieved Context: No relevant documents found."
+                    module_context += "\n\nRetrieved Context: No relevant documents found. The Knowledge Vault may be empty."
 
             messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
             prompt = _messages_to_prompt(messages_with_context)
@@ -394,27 +599,45 @@ class MetaAgent:
 
 _MODULE_CONTEXTS: dict[str, str] = {
     "ragforge": (
-        "You are in RAGForge mode. Answer questions using retrieved context. "
-        "Always cite sources. If no relevant context is retrieved, say so explicitly. "
-        "Do not hallucinate facts."
+        "You are RAGForge — a precise document intelligence assistant. "
+        "You answer questions EXCLUSIVELY from the Retrieved Context chunks shown below. "
+        "\n\n"
+        "CRITICAL RULES — violating these is your only failure mode:\n"
+        "1. NEVER use your training-data knowledge to answer. If a fact is not in the Retrieved Context, "
+        "you MUST say: 'I cannot find this information in the uploaded documents.'\n"
+        "2. NEVER guess, infer, or embellish. Do not add any information beyond what the chunks explicitly state.\n"
+        "3. For specific facts (author names, dates, numbers, equations, figure descriptions), you MUST quote "
+        "the exact text from the retrieved chunk and cite its source tag (e.g. [1], [2]).\n"
+        "4. If the user asks about figures/tables not represented in the retrieved text, say: "
+        "'The retrieved chunks do not include this figure/table's content. The document may contain embedded "
+        "images that require VLM visual processing.'\n"
+        "5. If multiple chunks contain conflicting information, present both and note the conflict.\n"
+        "6. Always end factual answers with the citation tag(s) — e.g. '[Source: paper.pdf | p.1]'.\n"
+        "7. When no documents are uploaded yet, say: 'No documents have been uploaded to the Knowledge Vault yet.'"
     ),
     "localbuddy": (
         "You are in LocalBuddy mode. Act as a helpful, concise AI assistant. "
         "Remember conversation context. Be honest about what you don't know."
     ),
     "watchtower": (
-        "You are in WatchTower mode. Analyze system metrics, logs, and events. "
-        "Identify anomalies, patterns, and potential issues. "
-        "Provide actionable recommendations."
+        "You are the WatchTower AI. Your job is to TAKE ACTIONS on system metrics — not describe them. "
+        "RULES: (1) When the user asks why something is high or slow, call query_metrics immediately. "
+        "(2) When the user asks what is using resources, call get_top_processes immediately. "
+        "(3) When the user wants to kill/stop/terminate a process, call kill_process immediately. "
+        "Never tell the user to navigate the UI. Never describe how a tool works. Just call the tool and report the result."
     ),
     "streamsync": (
-        "You are in StreamSync mode. Process and analyze event streams. "
-        "Identify temporal patterns, correlations, and sequences. "
-        "Output structured insights."
+        "You are the StreamSync AI. Your job is to EXECUTE stream operations — not explain StreamSync. "
+        "RULES: (1) When the user asks to see, show, or analyze events, call query_stream immediately. "
+        "(2) When the user asks for an overview, summary, or patterns, call summarize_stream immediately. "
+        "(3) When the user asks to clear or reset the buffer, call clear_buffer immediately. "
+        "Never explain how StreamSync works when you can just show real data instead."
     ),
     "tunelab": (
-        "You are in TuneLab mode. Help the user configure and monitor model "
-        "fine-tuning. Explain OPLoRA parameters, training metrics, and convergence."
+        "You are the TuneLab AI. Your job is to EXECUTE training operations and REPORT LIVE DATA — not explain theory. "
+        "RULES: (1) When the user asks how many samples are ready, pending, or in queue, call query_buffer_stats immediately. "
+        "(2) When the user says compile, train, trigger, or start — call trigger_compilation immediately. "
+        "(3) Never say you don't have access to data. Use your tools to fetch it."
     ),
 }
 

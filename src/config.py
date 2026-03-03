@@ -54,8 +54,12 @@ class AetherForgeSettings(BaseSettings):
     opa_server_url: str = "http://localhost:8181"
     # Maximum tool calls per agent turn (prevents runaway loops)
     silicon_colosseum_max_tool_calls: int = Field(default=8, ge=1, le=50)
-    # Minimum faithfulness score (0.0–1.0) to allow output
-    silicon_colosseum_min_faithfulness: float = Field(default=0.92, ge=0.0, le=1.0)
+    # Minimum faithfulness score (0.0–1.0) to allow output.
+    # NOTE: This threshold applies to real cosine similarity scores from SAMR-lite
+    # (not inflated keyword-heuristic scores). Paraphrased answers naturally score
+    # 0.55–0.75 vs source chunks — 0.45 catches truly ungrounded responses only.
+    # RAGForge module bypasses hard-blocking; SAMR-lite appends visible warnings instead.
+    silicon_colosseum_min_faithfulness: float = Field(default=0.45, ge=0.0, le=1.0)
 
     # ── Storage ───────────────────────────────────────────────────
     data_dir: Path = Path("./data")

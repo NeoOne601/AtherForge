@@ -21,6 +21,14 @@ _WINDOW_SIZE = 1000
 # Z-score threshold for anomaly detection (3σ = 99.7% confidence)
 _Z_THRESHOLD = 3.0
 
+# ── Calibration Baseline ──────────────────────────────────────────
+# Store the FIRST 30 readings as the "calm baseline" for each metric.
+# Z-scores are always compared against this baseline, not the current
+# window mean. This prevents baseline drift when the system runs hot
+# continuously (e.g. memory at 97% for hours → mean=97 → Z=0 for spikes).
+_CALIBRATION_BASELINE: dict[str, dict[str, float]] = {}  # {metric: {mean, std}}
+_CALIBRATION_SAMPLES = 30
+
 
 def build_watchtower_graph() -> dict[str, Any]:
     """Build WatchTower module descriptor."""
@@ -35,9 +43,13 @@ def build_watchtower_graph() -> dict[str, Any]:
 def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
     """
     Ingest a single metric value and check for anomalies.
-    Uses Z-score detection against a sliding window of past values.
 
-    Returns anomaly verdict with score and context.
+    Uses a two-phase strategy:
+      Phase 1 (first 30 samples): Build a calm baseline.
+      Phase 2 (subsequent): Z-score against that fixed baseline mean/std.
+
+    This prevents baseline-drift (the "hot system" problem where sustained
+    high values make the Z-score permanently 0).
     """
     if metric_name not in _METRIC_WINDOWS:
         _METRIC_WINDOWS[metric_name] = deque(maxlen=_WINDOW_SIZE)
@@ -46,13 +58,31 @@ def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
     is_anomaly = False
     z_score = 0.0
 
-    if len(window) >= 10:  # Need minimum samples for statistics
+    if len(window) >= _CALIBRATION_SAMPLES and metric_name not in _CALIBRATION_BASELINE:
+        # Lock in the calm baseline from the first N samples
+        arr = np.array(list(window)[:_CALIBRATION_SAMPLES])
+        _CALIBRATION_BASELINE[metric_name] = {
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+        }
+        logger.info("WatchTower baseline calibrated for '%s': mean=%.2f std=%.2f",
+                    metric_name, _CALIBRATION_BASELINE[metric_name]["mean"],
+                    _CALIBRATION_BASELINE[metric_name]["std"])
+
+    if metric_name in _CALIBRATION_BASELINE:
+        baseline = _CALIBRATION_BASELINE[metric_name]
+        std = baseline["std"]
+        # If std is too small (very stable metric), use a minimum of 2.0 so spikes register
+        effective_std = max(std, 2.0)
+        z_score = abs((value - baseline["mean"]) / effective_std)
+        is_anomaly = z_score > _Z_THRESHOLD
+    elif len(window) >= 10:
+        # Pre-calibration fallback: relative Z-score
         arr = np.array(window)
         mean = float(np.mean(arr))
         std = float(np.std(arr))
         if std > 1e-8:
             z_score = abs((value - mean) / std)
-            is_anomaly = z_score > _Z_THRESHOLD
 
     window.append(value)
 
@@ -63,10 +93,12 @@ def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
         "z_score": round(z_score, 3),
         "window_size": len(window),
         "timestamp": time.time(),
+        "baseline_locked": metric_name in _CALIBRATION_BASELINE,
     }
 
     if is_anomaly:
         logger.warning("ANOMALY detected: %s=%.4f z=%.2f", metric_name, value, z_score)
+        _recent_anomalies.append(result)
 
     return result
 

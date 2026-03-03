@@ -24,7 +24,6 @@ tauri-build = { version = "2.1", features = [] }
 [dependencies]
 # ── Tauri 2.1 Core ──────────────────────────────────────────────
 tauri = { version = "2.1", features = [
-  "protocol-asset",
   "tray-icon",
   "image-ico",
   "image-png",
