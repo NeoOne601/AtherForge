@@ -196,6 +196,20 @@ class ExportEngine:
                 md_text,
                 extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
             )
+            
+            # Convert file:// images to base64 for WeasyPrint/ReportLab stability
+            import base64
+            def _replace_img_with_base64(match):
+                img_path = match.group(1).replace("file://", "")
+                path = Path(img_path)
+                if path.exists():
+                    ext = path.suffix.lower().replace(".", "")
+                    with open(path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode()
+                        return f'src="data:image/{ext};base64,{b64}"'
+                return match.group(0)
+
+            body_html = re.sub(r'src="file://([^"]+)"', _replace_img_with_base64, body_html)
         except ImportError:
             # Fallback: basic regex conversion
             body_html = self._basic_md_to_html(md_text)

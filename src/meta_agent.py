@@ -392,7 +392,7 @@ class MetaAgent:
 
         # ── 3. Module dispatch ────────────────────────────────────
         t0 = time.perf_counter()
-        VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab"}
+        VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
         module = inp.module if inp.module in VALID_MODULES else "localbuddy"
         _trace("router", {"selected_module": module})
 
@@ -481,6 +481,14 @@ class MetaAgent:
                             "User: trigger the compilation\n"
                             "Assistant: Starting the OPLoRA compilation cycle now.\n"
                             "```json\n{\"tool_name\": \"trigger_compilation\", \"arguments\": {}}\n```"
+                        ),
+                        "analytics": (
+                            "User: summarize sales.xlsx\n"
+                            "Assistant: Analyzing the data in sales.xlsx now.\n"
+                            "```json\n{\"tool_name\": \"analyze_data\", \"arguments\": {\"source\": \"sales.xlsx\", \"operation\": \"summary\"}}\n```\n"
+                            "User: show me a bar chart of the sales by region\n"
+                            "Assistant: Generating a region-based sales chart for you.\n"
+                            "```json\n{\"tool_name\": \"create_visual\", \"arguments\": {\"chart_type\": \"bar\", \"title\": \"Sales by Region\", \"labels\": [\"North\", \"South\", \"East\", \"West\"], \"values\": [1500, 2300, 1800, 2100]}}\n```"
                         ),
                     }
                     few_shot += _FEW_SHOT_DICT.get(module, "")
@@ -724,7 +732,7 @@ class MetaAgent:
             memory.append(HumanMessage(content=inp.message))
             
             # Module dispatch and RAG Context
-            VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab"}
+            VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
             module = inp.module if inp.module in VALID_MODULES else "localbuddy"
             module_context = _MODULE_CONTEXTS.get(module, "")
 
@@ -833,6 +841,13 @@ _MODULE_CONTEXTS: dict[str, str] = {
         "RULES: (1) When the user asks how many samples are ready, pending, or in queue, call query_buffer_stats immediately. "
         "(2) When the user says compile, train, trigger, or start — call trigger_compilation immediately. "
         "(3) Never say you don't have access to data. Use your tools to fetch it."
+    ),
+    "analytics": (
+        "You are the DataVault AI. You perform data science and analysis on local files. "
+        "RULES: (1) When a user mentions a file like sales.csv or data.xlsx, use analyze_data to understand it. "
+        "(2) When asked for a figure, plot, chart, or graph, use create_visual. "
+        "(3) Before creating a visual, always verify the data points. If you don't have the data yet, call analyze_data first. "
+        "(4) Your goal is to provide comprehensive data-driven reports with visual evidence."
     ),
 }
 
