@@ -79,6 +79,7 @@ const MODULES: Module[] = [
     { id: "watchtower", name: "WatchTower", icon: "👁️", desc: "Anomaly detection" },
     { id: "streamsync", name: "StreamSync", icon: "⚡", desc: "Event streams" },
     { id: "tunelab", name: "TuneLab", icon: "🎛️", desc: "Fine-tuning control" },
+    { id: "analytics", name: "Analytics", icon: "📊", desc: "The DataVault" },
 ];
 
 const MODULE_SUGGESTIONS: Record<string, string[]> = {
@@ -127,6 +128,7 @@ export default function App() {
     const [selectedChatModel, setSelectedChatModel] = useState<string>("");
     const [isChangingChatModel, setIsChangingChatModel] = useState(false);
     const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+    const [deepReasoningEnabled, setDeepReasoningEnabled] = useState(false);
 
     useEffect(() => {
         fetch("/api/v1/chat-models").then(r => r.json()).then(d => {
@@ -240,6 +242,18 @@ export default function App() {
                         <span style={{ fontSize: "11px", color: webSearchEnabled ? "var(--brand-glow)" : "var(--text-muted)", fontWeight: 600 }}>🌐 Web Grounding</span>
                         <div style={{ width: "24px", height: "14px", background: webSearchEnabled ? "rgba(0,255,100,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "12px", position: "relative", transition: "all 0.2s", border: webSearchEnabled ? "1px solid rgba(0,255,100,0.3)" : "none" }}>
                             <div style={{ width: "10px", height: "10px", background: webSearchEnabled ? "var(--brand-glow)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "1px", left: webSearchEnabled ? "12px" : "2px", transition: "all 0.2s" }} />
+                        </div>
+                    </div>
+
+                    {/* Deep Reasoning Toggle */}
+                    <div
+                        style={{ display: "flex", alignItems: "center", gap: "6px", background: "var(--bg-elevated)", padding: "4px 8px", borderRadius: "12px", border: "1px solid var(--border)", cursor: "pointer" }}
+                        onClick={() => setDeepReasoningEnabled(!deepReasoningEnabled)}
+                        title="Enable a second internal reasoning pass before responding (slower, more thorough)"
+                    >
+                        <span style={{ fontSize: "11px", color: deepReasoningEnabled ? "var(--brand-glow)" : "var(--text-muted)", fontWeight: 600 }}>🧠 Deep Reasoning</span>
+                        <div style={{ width: "24px", height: "14px", background: deepReasoningEnabled ? "rgba(0,255,100,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "12px", position: "relative", transition: "all 0.2s", border: deepReasoningEnabled ? "1px solid rgba(0,255,100,0.3)" : "none" }}>
+                            <div style={{ width: "10px", height: "10px", background: deepReasoningEnabled ? "var(--brand-glow)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "1px", left: deepReasoningEnabled ? "12px" : "2px", transition: "all 0.2s" }} />
                         </div>
                     </div>
 
@@ -381,6 +395,7 @@ export default function App() {
                         preloadedMessages={loadedSessionMessages}
                         onSessionCreated={(id) => { setActiveSessionId(id); refreshSessions(); }}
                         webSearchEnabled={webSearchEnabled}
+                        deepReasoningEnabled={deepReasoningEnabled}
                     />}
                     {activePanel === "insights" && <InsightsPanel />}
                     {activePanel === "policies" && <PoliciesPanel />}
@@ -1084,6 +1099,7 @@ function ChatPanel({
     preloadedMessages,
     onSessionCreated,
     webSearchEnabled,
+    deepReasoningEnabled,
 }: {
     module: string;
     xray: boolean;
@@ -1092,6 +1108,7 @@ function ChatPanel({
     preloadedMessages?: StoredMessage[] | null;
     onSessionCreated?: (id: string) => void;
     webSearchEnabled?: boolean;
+    deepReasoningEnabled?: boolean;
 }) {
     // Store messages by module ID so switching tabs doesn't mix conversations
     const [messagesByModule, setMessagesByModule] = useState<Record<string, Message[]>>({
@@ -1191,6 +1208,7 @@ function ChatPanel({
             const activeDocs = module === "ragforge" ? ragDocs.filter(d => d.active).map(d => d.name) : [];
             const contextPayload: Record<string, any> = activeDocs.length > 0 ? { active_docs: activeDocs } : {};
             if (webSearchEnabled) contextPayload.web_search_enabled = true;
+            if (deepReasoningEnabled) contextPayload.deep_reasoning = true;
 
             const res = await fetch("/api/v1/chat", {
                 method: "POST",

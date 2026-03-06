@@ -34,9 +34,14 @@ logger = logging.getLogger("aetherforge.meta_agent")
 
 # ── System Prompt ─────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
-    "You are AetherForge, a local AI assistant. You run entirely on-device, "
-    "never send data to the cloud, and always cite your reasoning. "
-    "Be concise, accurate, and transparent about uncertainty."
+    "You are AetherForge, a local AI assistant. You run entirely on-device and "
+    "never send data to the cloud. "
+    "For every task, first think through the problem step by step, then present "
+    "a clear, structured answer to the user. "
+    "Prefer numbered lists or sections for non-trivial problems, and call out any "
+    "assumptions you make. "
+    "Be concise, accurate, and transparent about uncertainty while aiming for the "
+    "same depth and thoroughness as a state-of-the-art assistant like ChatGPT."
 )
 
 
@@ -622,7 +627,34 @@ class MetaAgent:
                 logger.error("Intent Engine Tool execution failed: %s", e)
                 response_text = f"[Intent Engine Error] Failed to execute the requested system tool: {e}"
 
-        # ── 4. Post-flight faithfulness score ─────────────────────
+        # ── 4. Optional Deep Reasoning Reflection Pass ─────────────
+        deep_reasoning_enabled = bool(inp.context.get("deep_reasoning", False))
+        if deep_reasoning_enabled and not isinstance(self._llm, MockLLM):
+            # Run a second, internal reflection pass to improve the draft answer.
+            # This pass never calls tools again; it only refines the explanation and reasoning.
+            reflection_system = SystemMessage(
+                content=(
+                    "You have already produced the draft answer above. "
+                    "Now carefully reflect on it: check the logic, fill in any missing steps, "
+                    "correct mistakes, and improve clarity and structure. "
+                    "Do NOT mention that you are revising your answer or that this is a second pass — "
+                    "just respond with the improved final answer."
+                )
+            )
+            reflection_messages = messages_with_context + [
+                AIMessage(content=response_text),
+                reflection_system,
+            ]
+            t_reflect = time.perf_counter()
+            improved = self._run_llm_sync(reflection_messages, temperature=0.3)
+            _trace(
+                "deep_reflection",
+                {"latency_ms": (time.perf_counter() - t_reflect) * 1000},
+            )
+            if improved:
+                response_text = improved
+        
+        # ── 5. Post-flight faithfulness score ─────────────────────
         # When a tool ran, the response is grounded in real data — automatically score it higher.
         # For RAGForge responses, use SAMR-lite (semantic cosine faithfulness).
         # For pure LLM responses to other modules, use the heuristic estimator.
@@ -819,8 +851,13 @@ _MODULE_CONTEXTS: dict[str, str] = {
         "7. When no documents are uploaded yet, say: 'No documents have been uploaded to the Knowledge Vault yet.'"
     ),
     "localbuddy": (
-        "You are in LocalBuddy mode. Act as a helpful, concise AI assistant. "
-        "Remember conversation context. Be honest about what you don't know."
+        "You are in LocalBuddy mode. Act as a deeply helpful, technically precise AI assistant. "
+        "For any non-trivial question, follow this pattern:\n"
+        "1) Briefly restate the user's goal in your own words.\n"
+        "2) Outline a short plan or set of steps you will take.\n"
+        "3) Work through the steps one by one, explaining key reasoning.\n"
+        "4) Finish with a concise summary or recommended next actions.\n"
+        "Always remember conversation context and be explicit about assumptions or uncertainties."
     ),
     "watchtower": (
         "You are the WatchTower AI. Your job is to TAKE ACTIONS on system metrics — not describe them. "
