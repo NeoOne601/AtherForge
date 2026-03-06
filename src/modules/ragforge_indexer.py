@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import gc
 import psutil
 from langchain_core.documents import Document
 
@@ -115,6 +116,8 @@ def _analyze_pdf(filepath: Path) -> dict:
     except Exception as e:
         logger.warning("PDF analysis failed: %s", e)
         return {"is_scanned": False, "has_images": False, "image_pages": [], "total_pages": 0, "total_images": 0}
+    finally:
+        gc.collect()  # Ensure fitz handle is released quickly
 
 
 def load_with_docling(filepath: Path) -> list[Document]:
@@ -368,6 +371,8 @@ def load_with_docling(filepath: Path) -> list[Document]:
     except Exception as e:
         logger.error("Docling failed on '%s': %s — falling back to PyPDFLoader", filepath.name, e)
         return _load_with_pypdf(filepath)
+    finally:
+        gc.collect()
 
 
 

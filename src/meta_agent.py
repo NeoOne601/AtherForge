@@ -217,7 +217,17 @@ class MetaAgent:
         if isinstance(self._llm, MockLLM):
             return self._llm.generate(messages)
 
-        prompt = _messages_to_prompt(messages)
+        # ── Context Window Pruning ────────────────────────────
+        # 4096 tokens * ~3.5 chars/token = 14,336 chars.
+        # We prune if the prompt exceeds 12,000 chars to stay safe.
+        pruned_messages = list(messages)
+        while len(_messages_to_prompt(pruned_messages)) > 12000 and len(pruned_messages) > 3:
+            # Keep index 0 (System Message), remove oldest User/Assistant pair
+            logger.info("Context window pressure: pruning oldest message pair")
+            pruned_messages.pop(1)
+            pruned_messages.pop(1)
+
+        prompt = _messages_to_prompt(pruned_messages)
         result = self._llm(
             prompt,
             max_tokens=max_tokens or self.settings.bitnet_max_tokens,

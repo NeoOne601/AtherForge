@@ -139,6 +139,13 @@ class OPLoRAManager:
         for f in sorted(self._checkpoint_dir.glob("*.npz")):
             try:
                 data = np.load(f, allow_pickle=True)
+                
+                # Check if this is a valid OPLoRA checkpoint (vs TuneLab or other)
+                required = ["task_id", "layer_key", "P_L", "P_R"]
+                if not all(k in data for k in required):
+                    logger.debug("Skipping non-OPLoRA checkpoint: %s", f.name)
+                    continue
+
                 subspace = TaskKnowledgeSubspace(
                     task_id=str(data["task_id"]),
                     layer_key=str(data["layer_key"]),

@@ -667,7 +667,7 @@ async def get_chat_models() -> JSONResponse:
 async def select_chat_model(req: ChatModelSelectRequest) -> JSONResponse:
     state: AppState = get_state(app)
     try:
-        await state.engine.meta_agent.switch_model(req.model_id)
+        await state.meta_agent.switch_model(req.model_id)
         return JSONResponse({"status": "success", "selected": req.model_id})
     except Exception as e:
         logger.error("Model switch failed: %s", e)
