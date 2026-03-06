@@ -427,31 +427,35 @@ def _split_large_block(text: str, max_chars: int) -> list[str]:
 def load_document(filepath: Path) -> list[Document]:
     """
     Smart document router:
-      .pdf  → Docling (default) or VLM (scanned fallback)
-      .csv  → CSVLoader
-      .txt/.md → TextLoader
+      .pdf, .xlsx, .xls  → Docling (default)
+      .csv               → CSVLoader
+      .txt/.md           → TextLoader
     """
     ext = filepath.suffix.lower()
 
     try:
-        if ext == ".pdf":
-            analysis = _analyze_pdf(filepath)
+        if ext in (".pdf", ".xlsx", ".xls"):
+            if ext == ".pdf":
+                analysis = _analyze_pdf(filepath)
 
-            if analysis["is_scanned"]:
-                # Purely scanned — VLM must read every page
-                logger.info("'%s' is scanned — full VLM processing needed", filepath.name)
-                # Return all pages as image_pages for async VLM processing
-                import fitz
-                pdf_doc = fitz.open(str(filepath))
-                all_pages = list(range(len(pdf_doc)))
-                pdf_doc.close()
-                return [], all_pages  # No text chunks, all pages need VLM
+                if analysis["is_scanned"]:
+                    # Purely scanned — VLM must read every page
+                    logger.info("'%s' is scanned — full VLM processing needed", filepath.name)
+                    # Return all pages as image_pages for async VLM processing
+                    import fitz
+                    pdf_doc = fitz.open(str(filepath))
+                    all_pages = list(range(len(pdf_doc)))
+                    pdf_doc.close()
+                    return [], all_pages  # No text chunks, all pages need VLM
+            else:
+                # Excel files don't need scanned analysis
+                analysis = {"has_images": False, "image_pages": []}
 
-            # Digital PDF — Docling handles all text extraction
+            # Digital PDF or Excel — Docling handles all text extraction
             chunks = load_with_docling(filepath)
 
-            # Return image_pages for async VLM processing (not done here anymore)
-            image_pages = analysis.get("image_pages", []) if analysis["has_images"] else []
+            # Return image_pages for async VLM processing
+            image_pages = analysis.get("image_pages", []) if analysis.get("has_images") else []
             if image_pages:
                 logger.info(
                     "Hybrid mode: Docling extracted %d text chunks, "
