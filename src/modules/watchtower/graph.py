@@ -62,7 +62,7 @@ def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
         # Lock in the calm baseline from the first N samples
         arr = np.array(list(window)[:_CALIBRATION_SAMPLES])
         _CALIBRATION_BASELINE[metric_name] = {
-            "mean": float(np.mean(arr)),
+            "mean": float(np.mean(arr)) if len(arr) > 0 else 0.0,
             "std": float(np.std(arr)),
         }
         logger.info("WatchTower baseline calibrated for '%s': mean=%.2f std=%.2f",
@@ -79,7 +79,7 @@ def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
     elif len(window) >= 10:
         # Pre-calibration fallback: relative Z-score
         arr = np.array(window)
-        mean = float(np.mean(arr))
+        mean = float(np.mean(arr)) if len(arr) > 0 else 0.0
         std = float(np.std(arr))
         if std > 1e-8:
             z_score = abs((value - mean) / std)

@@ -77,9 +77,10 @@ class StreamSyncDirectoryWatcher:
     def start(self):
         # 1. Backfill index: process any existing files in the directory
         # The index_document function handles deduplication mathematically
-        for filepath in self.watch_dir.iterdir():
-            if filepath.is_file() and not filepath.name.startswith("."):
-                asyncio.run_coroutine_threadsafe(self.handler.async_index(filepath), self.loop)
+        existing_files = [f for f in self.watch_dir.iterdir() if f.is_file() and not f.name.startswith(".")]
+        logger.info("StreamSync Directory Watcher performing boot-sweep: found %d files", len(existing_files))
+        for filepath in existing_files:
+            asyncio.run_coroutine_threadsafe(self.handler.async_index(filepath), self.loop)
 
         # 2. Watch for any new incoming files
         self.observer.schedule(self.handler, str(self.watch_dir), recursive=False)
