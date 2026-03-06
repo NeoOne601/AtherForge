@@ -120,6 +120,7 @@ class MetaAgent:
         self._llm: Any = None
         self._lock = asyncio.Lock()
         self._session_memories: dict[str, list[Any]] = {}
+        self._sparse_index: Any = None  # FTS5 sparse index (lazy init)
 
     async def initialize(self) -> None:
         """Load BitNet model in a thread executor (non-blocking)."""
@@ -155,6 +156,62 @@ class MetaAgent:
         self._llm = await loop.run_in_executor(None, _load)
         logger.info("BitNet model loaded")
 
+    async def switch_model(self, model_id: str) -> bool:
+        """
+        Dynamically unloads the current LLM, downloads a new one via HF Hub if missing,
+        and reloads it into unified memory.
+        """
+        import gc
+        from huggingface_hub import hf_hub_download
+
+        MODELS = {
+            "bitnet-2b": {
+                "repo": None,  # System default, should already exist
+                "file": "bitnet-b1.58-2b-4t.gguf"
+            },
+            "gemma2-2b": {
+                "repo": "bartowski/gemma-2-2b-it-GGUF",
+                "file": "gemma-2-2b-it-Q4_K_M.gguf"
+            },
+            "llama3.2-3b": {
+                "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+                "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+            }
+        }
+        
+        if model_id not in MODELS:
+            raise ValueError(f"Unknown chat model ID: {model_id}")
+
+        info = MODELS[model_id]
+        filename = info["file"]
+        repo_id = info["repo"]
+        target_path = self.settings.bitnet_model_path.parent / filename
+
+        async with self._lock:
+            logger.info("Unloading current LLM to free memory...")
+            if self._llm is not None:
+                del self._llm
+                self._llm = None
+                gc.collect()
+
+            if not target_path.exists():
+                if not repo_id:
+                    raise FileNotFoundError(f"Model file {filename} missing and no repo to pull from.")
+                logger.info("Downloading %s from HuggingFace (%s)...", filename, repo_id)
+                def _download():
+                    return hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=str(self.settings.bitnet_model_path.parent)
+                    )
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _download)
+
+            logger.info("Binding new model path: %s", target_path)
+            self.settings.bitnet_model_path = target_path
+            await self._load_model()
+            return True
+
     def _run_llm_sync(self, messages: list[Any], max_tokens: int | None = None, temperature: float | None = None) -> str:
         """Run the LLM synchronously (called from pipeline nodes)."""
         if isinstance(self._llm, MockLLM):
@@ -175,6 +232,100 @@ class MetaAgent:
         if session_id not in self._session_memories:
             self._session_memories[session_id] = [SystemMessage(content=_SYSTEM_PROMPT)]
         return self._session_memories[session_id]
+
+    def _hybrid_search(
+        self,
+        query: str,
+        k: int = 8,
+        source_filter: str | list[str] | None = None,
+    ) -> list[Any]:
+        """
+        Hybrid retrieval: Dense (ChromaDB/BGE-M3) + Sparse (FTS5/BM25).
+        Falls back to dense-only if FTS5 index is not available.
+
+        CRITICAL: Do NOT cache a permanent 'UNAVAILABLE' sentinel.
+        The DB is created when the first document is uploaded, which happens
+        AFTER the server starts. Always re-check if the DB now exists.
+        """
+        # Try to get/init the sparse index on every call when not yet loaded
+        if self._sparse_index is None:
+            try:
+                from src.modules.ragforge.sparse_index import SparseIndex
+                db_path = self.settings.data_dir / "sparse_index.db"
+                if db_path.exists() and db_path.stat().st_size > 0:
+                    self._sparse_index = SparseIndex(db_path=db_path)
+                    logger.info(
+                        "FTS5 sparse index loaded (%d chunks)",
+                        self._sparse_index.count(),
+                    )
+                # If DB doesn't exist yet, leave self._sparse_index = None
+                # so we retry on the next request (after a document is uploaded)
+            except Exception as e:
+                logger.warning("FTS5 init failed: %s", e)
+                # Do NOT set UNAVAILABLE — retry in the next call
+
+        # If sparse index is available, use hybrid search
+        if self._sparse_index is not None:
+            try:
+                from src.modules.ragforge.sparse_index import hybrid_search
+                results = hybrid_search(
+                    query=query,
+                    vector_store=self.vector_store,
+                    sparse_index=self._sparse_index,
+                    k=k,
+                    source_filter=source_filter,
+                )
+                
+                # Intent-Based Visual Boost
+                # If the user is asking about visual data, forcibly promote VLM chunks
+                q_lower = query.lower()
+                visual_triggers = {"chart", "diagram", "figure", "table", "image", "visual", "snapshot", "graph"}
+                if any(trigger in q_lower for trigger in visual_triggers):
+                    # We need to reach into the chunks and re-sort them based on a manual boost.
+                    # Since `hybrid_search` returns a sorted list of Documents (RRF scores are lost),
+                    # we will bubble up `vlm_analysis` chunks to the top 3 positions.
+                    vlm_docs = []
+                    text_docs = []
+                    for doc in results:
+                        if doc.metadata.get("chunk_type") == "vlm_analysis":
+                            vlm_docs.append(doc)
+                        else:
+                            text_docs.append(doc)
+                    
+                    if vlm_docs:
+                        results = vlm_docs + text_docs
+                        logger.info("Visual boost applied: prioritized %d VLM chunks for query '%s'", len(vlm_docs), query[:30])
+
+                logger.info(
+                    "Hybrid search: %d results for '%s...' (filter=%s)",
+                    len(results), query[:50], source_filter,
+                )
+                return results
+            except Exception as e:
+                logger.warning("Hybrid search failed: %s — falling back to dense", e)
+
+        # Fallback: dense-only (ChromaDB)
+        logger.info("Dense-only search for '%s...' (sparse index not loaded yet)", query[:50])
+        filter_kwargs = {}
+        if source_filter:
+            if isinstance(source_filter, str):
+                filter_kwargs["filter"] = {"source": source_filter}
+            elif isinstance(source_filter, list) and len(source_filter) == 1:
+                filter_kwargs["filter"] = {"source": source_filter[0]}
+            elif isinstance(source_filter, list):
+                filter_kwargs["filter"] = {"source": {"$in": source_filter}}
+        return self.vector_store.similarity_search(query, k=k, **filter_kwargs)
+
+    def _get_cognitive_rag(self) -> "CognitiveRAG":
+        """Lazily create a CognitiveRAG instance that reuses the loaded BitNet + search."""
+        if not hasattr(self, "_cognitive_rag_instance") or self._cognitive_rag_instance is None:
+            from src.modules.ragforge.cognitive_rag import CognitiveRAG
+            self._cognitive_rag_instance = CognitiveRAG(
+                llm_fn=self._run_llm_sync,
+                search_fn=self._hybrid_search,
+            )
+            logger.info("CognitiveRAG pipeline initialized (reusing BitNet + hybrid search)")
+        return self._cognitive_rag_instance
 
     async def run(self, inp: MetaAgentInput) -> MetaAgentOutput:
         """
@@ -245,50 +396,49 @@ class MetaAgent:
         if module == "ragforge" and self.vector_store:
             t_rag = time.perf_counter()
             active_docs = inp.context.get("active_docs", [])
-            filter_kwargs = {}
+            source_filter: str | list[str] | None = None
             if active_docs:
-                if len(active_docs) == 1:
-                    filter_kwargs["filter"] = {"source": active_docs[0]}
-                else:
-                    filter_kwargs["filter"] = {"source": {"$in": active_docs}}
+                source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
 
-            docs = self.vector_store.similarity_search(inp.message, k=6, **filter_kwargs)
-            retrieved_doc_texts: list[str] = []  # stored for SAMR-lite check below
-            if docs:
-                context_parts = []
-                for i, d in enumerate(docs):
-                    meta = d.metadata
-                    source = meta.get("source", "Unknown")
-                    page = meta.get("page", "?")
-                    section = meta.get("section", "")
-                    chunk_type = meta.get("chunk_type", "section")
-                    parser = meta.get("parser", "")
-                    # Build rich citation header for research papers
-                    citation = f"[{i+1}] {source} | p.{page}"
-                    if section:
-                        citation += f" | §{section[:60]}"
-                    if chunk_type in ("table", "equation"):
-                        citation += f" | [{chunk_type.upper()}]"
-                    context_parts.append(f"{citation}\n{d.page_content}")
-                    retrieved_doc_texts.append(d.page_content)
-                retrieved_text = "\n\nRetrieved Context (Precision Ingestion™):\n" + "\n\n".join(context_parts)
-                module_context += retrieved_text
-                _trace("rag_retrieval", {"chunks": len(docs), "latency_ms": (time.perf_counter() - t_rag) * 1000})
+            # ── CognitiveRAG: 7-Stage Thinking Pipeline ──────────
+            cognitive = self._get_cognitive_rag()
+            answer, evidence_docs, thinking_trace = cognitive.think_and_answer(
+                query=inp.message,
+                source_filter=source_filter,
+            )
+            retrieved_doc_texts = [d.page_content for d in evidence_docs]
+
+            if evidence_docs:
+                # DIRECT PASSTHROUGH: CognitiveRAG already produced a
+                # chain-of-thought, evidence-scored, self-verified answer.
+                # We skip the second LLM call and use this answer directly.
+                _cograg_direct_answer = answer
+                _trace("rag_retrieval", {
+                    "chunks": len(evidence_docs),
+                    "query_type": thinking_trace.query_type,
+                    "verified": thinking_trace.verification_passed,
+                    "rounds": thinking_trace.retrieval_rounds,
+                    "latency_ms": (time.perf_counter() - t_rag) * 1000,
+                })
             else:
+                _cograg_direct_answer = None
                 module_context += "\n\nRetrieved Context: No relevant documents found. Ask the user to upload documents first."
                 retrieved_doc_texts = []
                 _trace("rag_retrieval", {"chunks": 0, "latency_ms": (time.perf_counter() - t_rag) * 1000})
 
         # Inject Intent Engine Tools if applicable
+        # Inject Intent Engine Tools if applicable
         tool_module = None
+        tools_list = []
+        few_shot = ""
+        
         if module in {"watchtower", "streamsync", "tunelab"}:
             try:
                 import importlib
                 tool_module = importlib.import_module(f"src.modules.{module}.tools")
                 if hasattr(tool_module, "get_tools"):
-                    import json
-                    tools_def = json.dumps(tool_module.get_tools(), indent=2)
-                    _FEW_SHOT = {
+                    tools_list.extend(tool_module.get_tools())
+                    _FEW_SHOT_DICT = {
                         "watchtower": (
                             "User: why is memory usage so high?\n"
                             "Assistant: Let me pull the live memory stats now.\n"
@@ -323,26 +473,57 @@ class MetaAgent:
                             "```json\n{\"tool_name\": \"trigger_compilation\", \"arguments\": {}}\n```"
                         ),
                     }
-                    few_shot = _FEW_SHOT.get(module, "")
-                    module_context += (
-                        f"\n\nAVAILABLE TOOLS:\nYou have access to the following tools to act upon the {module} subsystem:\n"
-                        f"{tools_def}\n\n"
-                        "CRITICAL INSTRUCTION: You MUST call a tool when the user's request can be answered by one. "
-                        "Do NOT explain what the tool does. Do NOT guide the user through the UI. "
-                        "Call the tool first, then explain the result in plain language. "
-                        "Output the tool call wrapped in a ```json block in this exact format:\n"
-                        "```json\n{\"tool_name\": \"name_of_tool\", \"arguments\": {\"arg1\": \"val1\"}}\n```\n\n"
-                        f"MODULE-SPECIFIC EXAMPLES:\n{few_shot}"
-                    )
+                    few_shot += _FEW_SHOT_DICT.get(module, "")
             except Exception as e:
                 logger.error("Failed to load Intent Tools for %s: %s", module, e)
 
+        # Inject Web Search if enabled
+        web_search_enabled = inp.context.get("web_search_enabled", False)
+        if web_search_enabled:
+            tools_list.append({
+                "name": "search_web",
+                "description": "Searches the live internet (via DuckDuckGo) for up-to-date factual information, news, or live data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query to look up on the internet."}
+                    },
+                    "required": ["query"]
+                }
+            })
+            if few_shot: few_shot += "\n"
+            few_shot += (
+                "User: what is the weather in Tokyo right now?\n"
+                "Assistant: Let me check the live weather online.\n"
+                "```json\n{\"tool_name\": \"search_web\", \"arguments\": {\"query\": \"current weather in Tokyo\"}}\n```"
+            )
+
+        if tools_list:
+            import json
+            tools_def = json.dumps(tools_list, indent=2)
+            module_context += (
+                f"\n\nAVAILABLE TOOLS:\nYou have access to the following tools to act upon the system:\n"
+                f"{tools_def}\n\n"
+                "CRITICAL INSTRUCTION: You MUST call a tool when the user's request can be answered by one. "
+                "Do NOT explain what the tool does. Do NOT guide the user through the UI. "
+                "Call the tool first, then explain the result in plain language. "
+                "Output the tool call wrapped in a ```json block in this exact format:\n"
+                "```json\n{\"tool_name\": \"name_of_tool\", \"arguments\": {\"arg1\": \"val1\"}}\n```\n\n"
+                f"MODULE-SPECIFIC EXAMPLES:\n{few_shot}"
+            )
+
         messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
 
-        # Run LLM
-        # Force temperature to 0.0 when tools are present to ensure strict JSON adherence
-        llm_temp = 0.0 if tool_module else self.settings.bitnet_temperature
-        response_text = self._run_llm_sync(messages_with_context, temperature=llm_temp)
+        # Run LLM — but skip if CognitiveRAG already produced a verified answer
+        if module == "ragforge" and '_cograg_direct_answer' in dir() and _cograg_direct_answer:
+            # DIRECT PASSTHROUGH: CognitiveRAG's chain-of-thought answer is
+            # already evidence-scored and self-verified. No second LLM call needed.
+            response_text = _cograg_direct_answer
+            logger.info("CognitiveRAG direct passthrough — skipping redundant LLM call")
+        else:
+            # Force temperature to 0.0 when tools are present to ensure strict JSON adherence
+            llm_temp = 0.0 if tool_module else self.settings.bitnet_temperature
+            response_text = self._run_llm_sync(messages_with_context, temperature=llm_temp)
         _trace(f"module_{module}", {"latency_ms": (time.perf_counter() - t0) * 1000, "response_preview": response_text[:100]})
 
         # Tool Execution Loop
@@ -377,7 +558,19 @@ class MetaAgent:
                     tool_args = call_data.get("arguments", {})
                 
                 # Execute tool
-                if tool_module and hasattr(tool_module, "execute_tool"):
+                tool_output: str | None = None
+                
+                if tool_name == "search_web" and web_search_enabled:
+                    from duckduckgo_search import DDGS
+                    try:
+                        results = DDGS().text(tool_args.get("query", ""), max_results=3)
+                        chunks = [f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}" for r in results]
+                        tool_output = "\n\n".join(chunks) if chunks else "No results found on the internet."
+                    except Exception as e:
+                        tool_output = f"Web search failed: {e}"
+                        logger.error(tool_output)
+                        
+                elif tool_module and hasattr(tool_module, "execute_tool"):
                     import inspect
                     sig = inspect.signature(tool_module.execute_tool)
                     if "state" in sig.parameters:
@@ -385,26 +578,28 @@ class MetaAgent:
                         mock_state = MockState()
                         mock_state.replay_buffer = self.replay_buffer
                         mock_state.settings = self.settings
-                        tool_output = tool_module.execute_tool(tool_name, tool_args, mock_state)
+                        tool_output = str(tool_module.execute_tool(tool_name, tool_args, mock_state))
                     else:
-                        tool_output = tool_module.execute_tool(tool_name, tool_args)
-                    
-                    tool_calls.append({"name": tool_name, "arguments": tool_args, "result": str(tool_output)})
+                        tool_output = str(tool_module.execute_tool(tool_name, tool_args))
+                
+                if tool_output is not None:
+                    tool_calls.append({"name": tool_name, "arguments": tool_args, "result": tool_output})
                     
                     # Add tool execution result back into conversation
                     messages_with_context.append(AIMessage(content=response_text))
                     messages_with_context.append(SystemMessage(content=(
-                        f"Tool '{tool_name}' executed successfully and returned:\n{tool_output}\n\n"
-                        "Respond to the user in plain language summarizing what the tool found. "
-                        "Be direct — state the actual values. Do NOT say 'I don't have access', "
-                        "'as an AI', or 'I cannot'. The data is above. Summarize it clearly."
+                        f"Tool '{tool_name}' executed successfully and returned the following live data:\n{tool_output}\n\n"
+                        "Respond to the user in plain language summarizing the findings. "
+                        "Be direct — state the actual facts retrieved. Do NOT say 'I don't have access', "
+                        "'as an AI', or 'I cannot'. The data is provided above. Synthesize it clearly and concisely."
                     )))
                     
                     t1 = time.perf_counter()
                     response_text = self._run_llm_sync(messages_with_context)
                     tool_executed_successfully = True
                     _trace(f"tool_execution_{tool_name}", {"result": str(tool_output)[:50], "latency_ms": (time.perf_counter() - t1) * 1000})
-                    
+                else:
+                    response_text = f"[Intent Engine Error] Tool '{tool_name}' was not recognized or is disabled in the current context."
             except Exception as e:
                 logger.error("Intent Engine Tool execution failed: %s", e)
                 response_text = f"[Intent Engine Error] Failed to execute the requested system tool: {e}"
@@ -525,37 +720,27 @@ class MetaAgent:
 
             if module == "ragforge" and self.vector_store:
                 active_docs = inp.context.get("active_docs", [])
-                filter_kwargs = {}
+                source_filter: str | list[str] | None = None
                 if active_docs:
-                    if len(active_docs) == 1:
-                        filter_kwargs["filter"] = {"source": active_docs[0]}
-                    else:
-                        filter_kwargs["filter"] = {"source": {"$in": active_docs}}
+                    source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
 
-                docs = self.vector_store.similarity_search(inp.message, k=8, **filter_kwargs)
-                if docs:
-                    context_parts = []
-                    has_images_note = False
-                    for i, d in enumerate(docs):
-                        meta = d.metadata
-                        source = meta.get("source", "Unknown")
-                        page = meta.get("page", "?")
-                        section = meta.get("section", "")
-                        chunk_type = meta.get("chunk_type", "section")
-                        citation = f"[{i+1}] {source} | p.{page}"
-                        if section:
-                            citation += f" | §{section[:60]}"
-                        if chunk_type in ("table", "equation"):
-                            citation += f" | [{chunk_type.upper()}]"
-                        context_parts.append(f"{citation}\n{d.page_content}")
-                    retrieved_text = "\n\nRetrieved Context (Precision Ingestion™):\n" + "\n\n".join(context_parts)
-                    # Warn about embedded images not in text index
-                    retrieved_text += (
-                        "\n\n[SYSTEM NOTE: This document contains embedded images/figures that are not "
-                        "in the text index. For figure/diagram content, the retrieved chunks may only "
-                        "contain captions or references — not the visual content itself.]"
-                    )
-                    module_context += retrieved_text
+                # ── CognitiveRAG: 7-Stage Thinking Pipeline ──────
+                cognitive = self._get_cognitive_rag()
+                answer, evidence_docs, thinking_trace = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: cognitive.think_and_answer(
+                        query=inp.message,
+                        source_filter=source_filter,
+                    ),
+                )
+
+                if evidence_docs:
+                    # DIRECT PASSTHROUGH: Stream CognitiveRAG answer directly
+                    # instead of running the LLM again on top of it.
+                    for word in answer.split():
+                        yield {"type": "token", "content": word + " "}
+                    memory.append(AIMessage(content=answer))
+                    return
                 else:
                     module_context += "\n\nRetrieved Context: No relevant documents found. The Knowledge Vault may be empty."
 

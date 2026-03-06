@@ -25,49 +25,96 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import psutil
 from langchain_core.documents import Document
 
 logger = logging.getLogger("aetherforge.ragforge_indexer")
 
+# ── Memory Governor ──────────────────────────────────────────────
+# Hard cap: never start an IN-PROCESS VLM if system memory exceeds this.
+# On 8GB macOS: baseline OS uses ~50% (4GB). At 85% ceiling = 6.8GB.
+# NOTE: Ollama runs as a SEPARATE OS process and is NOT subject to this
+# ceiling — it manages its own memory. Only in-process HuggingFace models
+# (SmolVLM, Florence, QwenVL) are gated by this check.
+MEMORY_CEILING_PCT = 85.0
+# Ollama-based VLMs are out-of-process; use a higher threshold since they
+# don't load into Python's heap at all.
+MEMORY_CEILING_PCT_OLLAMA = 97.0
+
+
+def _check_memory_budget(label: str = "VLM", is_ollama: bool = False) -> bool:
+    """Returns True if enough memory is available to proceed."""
+    ceiling = MEMORY_CEILING_PCT_OLLAMA if is_ollama else MEMORY_CEILING_PCT
+    mem = psutil.virtual_memory()
+    if mem.percent >= ceiling:
+        logger.warning(
+            "⚠️  Memory Governor: %.1f%% used (ceiling: %.0f%%) — deferring %s",
+            mem.percent, ceiling, label,
+        )
+        return False
+    logger.info("Memory Governor: %.1f%% used — %s approved (ceiling: %.0f%%)", mem.percent, label, ceiling)
+    return True
+
 # ── Chunk size limits ─────────────────────────────────────────────
-# BGE-M3 supports 8192 tokens. At ~3.5 chars/token, that's ~28 000 chars.
-# We keep chunks well below that so embeddings are focused, not diluted.
-MAX_SECTION_CHARS = 6000   # one section / heading block
-MAX_TABLE_CHARS = 4000     # one complete table
-MAX_EQUATION_CHARS = 2000  # one equation block
-FALLBACK_CHUNK_SIZE = 1500  # plain text fallback (better than old 1000)
-FALLBACK_OVERLAP = 150      # reduced from 200; less semantic confusion
+# all-MiniLM-L6-v2 supports 512 tokens. At ~3.5 chars/token, that's ~1800 chars.
+# We keep chunks well below that so embeddings are focused and not truncated.
+MAX_SECTION_CHARS = 1500   # one section / heading block
+MAX_TABLE_CHARS = 1200     # one complete table
+MAX_EQUATION_CHARS = 800   # one equation block
+FALLBACK_CHUNK_SIZE = 1000  # plain text fallback
+FALLBACK_OVERLAP = 100      # overlap between chunks
 
 
 # ─────────────────────────────────────────────────────────────────
 # Phase 1: Smart Loading
 # ─────────────────────────────────────────────────────────────────
 
-def _should_use_vlm(filepath: Path) -> bool:
+def _analyze_pdf(filepath: Path) -> dict:
     """
-    Heuristic to determine if we need the Visual Language Model:
-    1. Scanned PDF: < 50 chars/page on average
-    2. Image-heavy digital PDF: > 5 embedded images total (meaning it has charts/figures)
+    Analyze a PDF to determine processing strategy.
+    Returns:
+        {
+            "is_scanned": bool,       # True if < 50 chars/page (pure scan)
+            "has_images": bool,       # True if > 3 embedded images total
+            "image_pages": list[int], # Page indices that contain embedded images
+            "total_pages": int,
+            "total_images": int,
+        }
     """
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(str(filepath))
-        
+
         num_pages = max(len(doc), 1)
         total_chars = sum(len(page.get_text()) for page in doc)
-        total_images = sum(len(page.get_images()) for page in doc)
-        
         avg_chars = total_chars / num_pages
+
+        image_pages: list[int] = []
+        total_images = 0
+        for page_idx in range(num_pages):
+            page_images = doc[page_idx].get_images()
+            if page_images:
+                image_pages.append(page_idx)
+                total_images += len(page_images)
+
         doc.close()
-        
-        # Route to VLM if it's literally a scan, or if it has embedded figures to read
-        if avg_chars < 50 or total_images > 5:
-            logger.info("Routing '%s' to VLM (avg_chars: %.0f, total_images: %d)", filepath.name, avg_chars, total_images)
-            return True
-        return False
+
+        result = {
+            "is_scanned": avg_chars < 50,
+            "has_images": total_images > 0,
+            "image_pages": image_pages,
+            "total_pages": num_pages,
+            "total_images": total_images,
+        }
+        logger.info(
+            "PDF analysis '%s': scanned=%s, images=%d on %d/%d pages",
+            filepath.name, result["is_scanned"], total_images,
+            len(image_pages), num_pages,
+        )
+        return result
     except Exception as e:
-        logger.warning("VLM heuristic failed: %s", e)
-        return False  # assume digital text-only if we can't tell
+        logger.warning("PDF analysis failed: %s", e)
+        return {"is_scanned": False, "has_images": False, "image_pages": [], "total_pages": 0, "total_images": 0}
 
 
 def load_with_docling(filepath: Path) -> list[Document]:
@@ -95,14 +142,46 @@ def load_with_docling(filepath: Path) -> list[Document]:
             item_label = str(getattr(item, "label", "text")).lower()
             item_text = ""
 
-            # Skip picture/image items — they have no text content to embed.
-            # PictureItem.export_to_markdown() requires `doc` arg and returns
-            # only a placeholder; VLM handles these via the scanned PDF path.
+            # Handle picture/image/figure items — extract captions and any text
+            # IMPORTANT: Do NOT skip these. Docling's PictureItem may contain
+            # caption text that is the ONLY representation of figures in the index.
             if item_label in ("picture", "image", "figure"):
-                continue
+                # Try to extract caption text from the item
+                caption_text = ""
+                if hasattr(item, "caption") and item.caption:
+                    cap = item.caption
+                    if hasattr(cap, "text"):
+                        caption_text = cap.text.strip()
+                    elif isinstance(cap, str):
+                        caption_text = cap.strip()
+                if not caption_text and hasattr(item, "text") and item.text:
+                    caption_text = item.text.strip()
+                if not caption_text:
+                    # Try export_to_markdown as last resort
+                    try:
+                        if hasattr(item, "export_to_markdown"):
+                            import inspect
+                            sig = inspect.signature(item.export_to_markdown)
+                            if "doc" in sig.parameters:
+                                caption_text = item.export_to_markdown(doc).strip()
+                            else:
+                                caption_text = item.export_to_markdown().strip()
+                    except Exception:
+                        pass
+                if caption_text:
+                    item_text = caption_text
+                    item_label = "figure_caption"  # override for proper chunk typing
+                else:
+                    # No text at all — use a placeholder so the figure is at least findable
+                    page_num = 0
+                    if hasattr(item, "prov") and item.prov:
+                        prov = item.prov[0] if isinstance(item.prov, list) else item.prov
+                        page_num = getattr(prov, "page_no", 0)
+                    item_text = f"[Figure on page {page_num}]"
+                    item_label = "figure_caption"
 
             # Extract text content based on item type
-            if hasattr(item, "text") and item.text:
+            elif hasattr(item, "text") and item.text:
                 item_text = item.text.strip()
             elif hasattr(item, "export_to_markdown"):
                 try:
@@ -167,6 +246,120 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 ))
 
         logger.info("Docling extracted %d semantic chunks from '%s'", len(chunks), filepath.name)
+
+        # ── Post-processing: Figure & Table Reference Extraction ──
+        # Scan ALL text chunks for in-text figure/table references
+        # like "Figure 3 shows..." or "Table 2 presents..." and
+        # build enriched context chunks linking captions to references.
+        import re as _re
+
+        # Build a registry: figure_num → {caption, references, pages}
+        figure_registry: dict[str, dict] = {}
+        table_registry: dict[str, dict] = {}
+
+        for chunk in chunks:
+            text = chunk.page_content
+            page = chunk.metadata.get("page", 0)
+
+            # Track figure captions
+            if chunk.metadata.get("chunk_type") == "figure_caption":
+                fig_match = _re.search(r'(?:Figure|Fig\.?)\s*(\d+)', text, _re.IGNORECASE)
+                if fig_match:
+                    fig_num = fig_match.group(1)
+                    figure_registry.setdefault(fig_num, {"caption": "", "references": [], "pages": set()})
+                    figure_registry[fig_num]["caption"] = text
+                    figure_registry[fig_num]["pages"].add(page)
+
+            # Track table content
+            if chunk.metadata.get("chunk_type") == "table":
+                tab_match = _re.search(r'Table\s*(\d+)', text, _re.IGNORECASE)
+                if tab_match:
+                    tab_num = tab_match.group(1)
+                    table_registry.setdefault(tab_num, {"content": "", "references": [], "pages": set()})
+                    table_registry[tab_num]["content"] = text[:500]  # cap table text
+                    table_registry[tab_num]["pages"].add(page)
+
+            # Find in-text references to figures
+            for fig_ref in _re.finditer(r'(?:Figure|Fig\.?)\s*(\d+)', text, _re.IGNORECASE):
+                fig_num = fig_ref.group(1)
+                figure_registry.setdefault(fig_num, {"caption": "", "references": [], "pages": set()})
+                # Store the sentence containing the reference
+                start = max(0, fig_ref.start() - 100)
+                end = min(len(text), fig_ref.end() + 200)
+                context_sentence = text[start:end].strip()
+                if context_sentence not in figure_registry[fig_num]["references"]:
+                    figure_registry[fig_num]["references"].append(context_sentence)
+                figure_registry[fig_num]["pages"].add(page)
+
+            # Find in-text references to tables
+            for tab_ref in _re.finditer(r'Table\s*(\d+)', text, _re.IGNORECASE):
+                tab_num = tab_ref.group(1)
+                table_registry.setdefault(tab_num, {"content": "", "references": [], "pages": set()})
+                start = max(0, tab_ref.start() - 100)
+                end = min(len(text), tab_ref.end() + 200)
+                context_sentence = text[start:end].strip()
+                if context_sentence not in table_registry[tab_num]["references"]:
+                    table_registry[tab_num]["references"].append(context_sentence)
+                table_registry[tab_num]["pages"].add(page)
+
+        # Create enriched figure context chunks
+        for fig_num, info in figure_registry.items():
+            parts = [f"Figure {fig_num}"]
+            if info["caption"]:
+                parts.append(f"Caption: {info['caption']}")
+            if info["references"]:
+                parts.append("Referenced in text:")
+                for ref in info["references"][:5]:  # cap at 5 references
+                    parts.append(f"  - {ref}")
+            if info["pages"]:
+                parts.append(f"Pages: {', '.join(str(p) for p in sorted(info['pages']))}")
+
+            fig_text = "\n".join(parts)
+            chunks.append(Document(
+                page_content=fig_text,
+                metadata={
+                    "source": filepath.name,
+                    "chunk_type": "figure_context",
+                    "section": f"Figure {fig_num}",
+                    "page": min(info["pages"]) if info["pages"] else 0,
+                    "sub_index": 0,
+                    "doc_label": "figure_context",
+                    "parser": "docling",
+                    "figure_number": fig_num,
+                },
+            ))
+
+        # Create enriched table context chunks
+        for tab_num, info in table_registry.items():
+            parts = [f"Table {tab_num}"]
+            if info["content"]:
+                parts.append(f"Content: {info['content']}")
+            if info["references"]:
+                parts.append("Referenced in text:")
+                for ref in info["references"][:5]:
+                    parts.append(f"  - {ref}")
+
+            tab_text = "\n".join(parts)
+            chunks.append(Document(
+                page_content=tab_text,
+                metadata={
+                    "source": filepath.name,
+                    "chunk_type": "table_context",
+                    "section": f"Table {tab_num}",
+                    "page": min(info["pages"]) if info["pages"] else 0,
+                    "sub_index": 0,
+                    "doc_label": "table_context",
+                    "parser": "docling",
+                    "table_number": tab_num,
+                },
+            ))
+
+        fig_count = len(figure_registry)
+        tab_count = len(table_registry)
+        if fig_count or tab_count:
+            logger.info("Figure/table registry: %d figures, %d tables extracted from text",
+                       fig_count, tab_count)
+
         return chunks
 
     except ImportError:
@@ -177,89 +370,6 @@ def load_with_docling(filepath: Path) -> list[Document]:
         return _load_with_pypdf(filepath)
 
 
-def load_scanned_with_vlm(filepath: Path) -> list[Document]:
-    """
-    For scanned / image-heavy PDFs: render each page with PyMuPDF,
-    send to VLM (Qwen2-VL via Ollama) for visual text extraction.
-    Falls back to PyPDFLoader if Ollama is not running.
-    """
-    try:
-        import fitz  # PyMuPDF
-        from src.modules.ragforge.vlm_processor import AcademicVLMProcessor
-        import asyncio
-
-        logger.info("VLM path: rendering '%s' pages as images...", filepath.name)
-        pdf_doc = fitz.open(str(filepath))
-        vlm = AcademicVLMProcessor()
-        chunks: list[Document] = []
-
-        for page_num in range(len(pdf_doc)):
-            page = pdf_doc[page_num]
-            # Render at 2x resolution for better OCR quality
-            mat = fitz.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=mat)
-            img_bytes = pix.tobytes("png")
-
-            # Run async VLM in sync context
-            try:
-                loop = asyncio.new_event_loop()
-                extracted = loop.run_until_complete(vlm.extract_academic_content(img_bytes))
-                loop.close()
-            except Exception as vlm_err:
-                logger.warning("VLM failed on page %d: %s", page_num, vlm_err)
-                extracted = {"text": "", "tables": [], "equations": []}
-
-            # Main page text
-            if extracted.get("text"):
-                chunks.append(Document(
-                    page_content=extracted["text"],
-                    metadata={
-                        "source": filepath.name,
-                        "chunk_type": "section",
-                        "section": extracted.get("section_heading", f"Page {page_num + 1}"),
-                        "page": page_num,
-                        "parser": "vlm",
-                    }
-                ))
-
-            # Tables extracted by VLM
-            for table_text in extracted.get("tables", []):
-                if table_text.strip():
-                    chunks.append(Document(
-                        page_content=table_text,
-                        metadata={
-                            "source": filepath.name,
-                            "chunk_type": "table",
-                            "section": extracted.get("section_heading", f"Page {page_num + 1}"),
-                            "page": page_num,
-                            "parser": "vlm",
-                        }
-                    ))
-
-            # Equations extracted by VLM
-            for eq_text in extracted.get("equations", []):
-                if eq_text.strip():
-                    chunks.append(Document(
-                        page_content=eq_text,
-                        metadata={
-                            "source": filepath.name,
-                            "chunk_type": "equation",
-                            "section": extracted.get("section_heading", f"Page {page_num + 1}"),
-                            "page": page_num,
-                            "parser": "vlm",
-                        }
-                    ))
-
-        pdf_doc.close()
-        logger.info("VLM extracted %d chunks from '%s'", len(chunks), filepath.name)
-        return chunks
-
-    except ImportError as ie:
-        logger.warning("VLM/PyMuPDF not available (%s) — falling back to PyPDFLoader", ie)
-        return _load_with_pypdf(filepath)
-    except Exception as e:
-        logger.error("VLM processing failed: %s — falling back to PyPDFLoader", e)
-        return _load_with_pypdf(filepath)
 
 
 def _load_with_pypdf(filepath: Path) -> list[Document]:
@@ -320,12 +430,31 @@ def load_document(filepath: Path) -> list[Document]:
 
     try:
         if ext == ".pdf":
-            # Decide: digital text-only or VLM-required (scanned / image-heavy)?
-            if _should_use_vlm(filepath):
-                logger.info("'%s' routed to VLM (scanned/image-heavy)", filepath.name)
-                return load_scanned_with_vlm(filepath)
-            else:
-                return load_with_docling(filepath)
+            analysis = _analyze_pdf(filepath)
+
+            if analysis["is_scanned"]:
+                # Purely scanned — VLM must read every page
+                logger.info("'%s' is scanned — full VLM processing needed", filepath.name)
+                # Return all pages as image_pages for async VLM processing
+                import fitz
+                pdf_doc = fitz.open(str(filepath))
+                all_pages = list(range(len(pdf_doc)))
+                pdf_doc.close()
+                return [], all_pages  # No text chunks, all pages need VLM
+
+            # Digital PDF — Docling handles all text extraction
+            chunks = load_with_docling(filepath)
+
+            # Return image_pages for async VLM processing (not done here anymore)
+            image_pages = analysis.get("image_pages", []) if analysis["has_images"] else []
+            if image_pages:
+                logger.info(
+                    "Hybrid mode: Docling extracted %d text chunks, "
+                    "%d image pages queued for async VLM processing",
+                    len(chunks), len(image_pages),
+                )
+
+            return chunks, image_pages
 
         elif ext == ".csv":
             from langchain_community.document_loaders import CSVLoader
@@ -335,7 +464,7 @@ def load_document(filepath: Path) -> list[Document]:
                 doc.metadata["source"] = filepath.name
                 doc.metadata["chunk_type"] = "table"
                 doc.metadata["parser"] = "csvloader"
-            return docs
+            return docs, []
 
         elif ext in (".txt", ".md"):
             from langchain_community.document_loaders import TextLoader
@@ -352,7 +481,7 @@ def load_document(filepath: Path) -> list[Document]:
                 chunk.metadata["source"] = filepath.name
                 chunk.metadata["chunk_type"] = "section"
                 chunk.metadata["parser"] = "textloader"
-            return chunks
+            return chunks, []
 
         else:
             logger.warning("Unsupported extension '%s' — trying TextLoader", ext)
@@ -363,45 +492,92 @@ def load_document(filepath: Path) -> list[Document]:
                 doc.metadata["source"] = filepath.name
                 doc.metadata["chunk_type"] = "section"
                 doc.metadata["parser"] = "textloader_fallback"
-            return docs
+            return docs, []
 
     except Exception as e:
         logger.error("load_document failed for '%s': %s", filepath.name, e)
-        return []
+        return [], []
 
 
 # ─────────────────────────────────────────────────────────────────
 # Phase 2 + 3: Index into ChromaDB
 # ─────────────────────────────────────────────────────────────────
 
-def index_document(filepath: Path, vector_store: Any) -> dict[str, Any]:
+def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) -> dict[str, Any]:
     """
-    Full Precision Ingestion™ pipeline:
-      1. Load + semantically chunk (Phase 1+2)
-      2. Embed with BGE-M3 and store in ChromaDB (Phase 3)
-
-    Returns indexing summary with chunk breakdown by type.
+    Fast Ingestion pipeline:
+      1. Delete existing chunks for this source (deduplication guard)
+      2. Load + semantically chunk (Docling text extraction)
+      3. Embed with all-MiniLM-L6-v2 and store in ChromaDB
+      4. Write to FTS5 sparse index (uses shared AppState singleton when provided)
+      5. Return image_pages for async VLM processing
     """
     logger.info("RAGForge Precision Ingestion — indexing: %s", filepath.name)
 
-    # Load via smart router
-    chunks = load_document(filepath)
+    # ── Step 0: Deduplicate — delete existing chunks for this source ──
+    # This prevents chunk accumulation when a user re-uploads the same document.
+    source_name = filepath.name
+    try:
+        # ChromaDB dedup: delete by source metadata
+        existing = vector_store.get(where={"source": source_name})
+        if existing and existing.get("ids"):
+            vector_store.delete(ids=existing["ids"])
+            logger.info("Dedup: removed %d existing ChromaDB chunks for '%s'", len(existing["ids"]), source_name)
+    except Exception as dedup_err:
+        logger.warning("ChromaDB dedup failed (non-fatal): %s", dedup_err)
+
+    if sparse_index is not None:
+        try:
+            deleted = sparse_index.delete_by_source(source_name)
+            if deleted > 0:
+                logger.info("Dedup: removed %d existing FTS5 chunks for '%s'", deleted, source_name)
+        except Exception as dedup_err:
+            logger.warning("FTS5 dedup failed (non-fatal): %s", dedup_err)
+
+    # Load via smart router — returns (chunks, image_pages)
+    result = load_document(filepath)
+    if isinstance(result, tuple):
+        chunks, image_pages = result
+    else:
+        chunks, image_pages = result, []
+        
     if not chunks:
-        logger.error("No content extracted from '%s'", filepath.name)
+        logger.warning("No text chunks extracted from '%s' (may need VLM for scanned PDF)", filepath.name)
+        if image_pages:
+            return {
+                "file": filepath.name, "chunks_added": 0,
+                "image_pages": image_pages, "parser": "pending_vlm",
+                "chunk_breakdown": {},
+            }
         return {"file": filepath.name, "chunks_added": 0, "error": "extraction_failed"}
 
     # Inject stable source metadata
+    parser = chunks[0].metadata.get("parser", "unknown") if chunks else "unknown"
     for chunk in chunks:
         chunk.metadata.setdefault("source", filepath.name)
         chunk.metadata.setdefault("chunk_type", "section")
         chunk.metadata.setdefault("section", "Unknown")
         chunk.metadata.setdefault("page", 0)
-        # Add stable unique doc_id per chunk for dedup
         chunk.metadata["chunk_id"] = str(uuid.uuid4())
+        chunk.metadata["parser"] = parser  # store parser for traceability
 
-    # Embed and store in ChromaDB (BGE-M3 used via vector_store.embedding_function)
-    logger.info("Embedding %d chunks with BGE-M3...", len(chunks))
+    # Embed and store in ChromaDB
+    logger.info("Embedding %d chunks...", len(chunks))
     vector_store.add_documents(chunks)
+
+    # ── FTS5 Sparse Index: use shared singleton or create local instance ──
+    try:
+        if sparse_index is not None:
+            sparse_index.add_documents(chunks)
+            logger.info("FTS5 sparse index updated via shared singleton (%d chunks)", len(chunks))
+        else:
+            from src.modules.ragforge.sparse_index import SparseIndex
+            sparse_idx = SparseIndex(db_path=filepath.parent.parent / "sparse_index.db")
+            sparse_idx.add_documents(chunks)
+            sparse_idx.close()
+            logger.info("FTS5 sparse index updated with %d chunks", len(chunks))
+    except Exception as fts_err:
+        logger.warning("FTS5 indexing failed (non-fatal): %s", fts_err)
 
     # Build summary by chunk type
     type_counts: dict[str, int] = {}
@@ -420,4 +596,5 @@ def index_document(filepath: Path, vector_store: Any) -> dict[str, Any]:
         "chunks_added": len(chunks),
         "parser": parser,
         "chunk_breakdown": type_counts,
+        "image_pages": image_pages,
     }

@@ -35,10 +35,12 @@ _os.environ.setdefault("DOCLING_CACHE_DIR",              f"{_EXTERNAL_AI_DRIVE}/
 # ─────────────────────────────────────────────────────────────────
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import psutil
@@ -55,8 +57,10 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 from src.config import AetherForgeSettings, get_settings
 from src.guardrails.silicon_colosseum import SiliconColosseum
+import uuid
 from src.learning.replay_buffer import ReplayBuffer
 from src.meta_agent import MetaAgent, MetaAgentInput
+from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger("aetherforge.main")
 
@@ -70,7 +74,17 @@ class AppState:
     colosseum: SiliconColosseum
     scheduler: AsyncIOScheduler
     vector_store: Any
+    sparse_index: Any          # SparseIndex singleton — shared to prevent orphan DB writes
+    export_engine: Any         # ExportEngine — MD + PDF export
     startup_ms: float
+    selected_vlm_id: str = "smolvlm-256m"  # Default to Lite tier for 8GB safety
+
+    # StreamSync additions
+    streamsync_rss_feeds: list[str] = []
+    directory_watcher: Any = None
+
+    # Sync
+    sync_manager: Any = None
 
 
 # ── Lifespan (replaces @app.on_event) ────────────────────────────
@@ -102,23 +116,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Replay buffer ready at %s", settings.replay_buffer_path)
 
     # ── 2.5 Initialise local Vector Store (ChromaDB + BGE-M3) ─────
-    # BAAI/bge-m3 replaces all-MiniLM-L6-v2:
-    #   - 8192 token limit (vs 512) — full PDF sections fit in one vector
-    #   - 1024 dimensions (vs 384) — richer semantic space for academic text
-    #   - Dense + Sparse + Multi-vector unified model (best retrieval accuracy)
-    #   - Fully offline, ~570MB, Apache 2.0
-    logger.info("Initializing ChromaDB with BAAI/bge-m3 embeddings...")
+    # all-MiniLM-L6-v2 — lightweight embedding model for 8GB edge devices:
+    #   - 22M params, 80MB model file (vs BGE-M3's 2.27GB)
+    #   - 384 dimensions, 512 token limit
+    #   - Embeds at ~3000 sentences/sec on CPU (vs BGE-M3's ~10 sentences/sec)
+    #   - Combined with FTS5/BM25 hybrid search, keyword matching compensates
+    #     for the smaller embedding space — best speed/quality for edge devices.
+    logger.info("Initializing ChromaDB with all-MiniLM-L6-v2 embeddings...")
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-m3",
-        model_kwargs={"device": "cpu"},          # works on any machine, MPS auto-detected
-        encode_kwargs={"normalize_embeddings": True},  # required for cosine similarity
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
     )
     state.vector_store = Chroma(
         persist_directory=str(settings.chroma_path),
         embedding_function=embeddings,
     )
-    logger.info("ChromaDB active at %s | model=bge-m3 | dims=1024 | max_tokens=8192",
+    logger.info("ChromaDB active at %s | model=all-MiniLM-L6-v2 | dims=384",
                 settings.chroma_path)
+
+    # ── 2.6 Initialise shared SparseIndex (FTS5/BM25) ────────────────
+    # Singleton shared across upload + VLM background paths to ensure
+    # all chunks (text AND visual) go to the same SQLite database.
+    from src.modules.ragforge.sparse_index import SparseIndex
+    state.sparse_index = SparseIndex(
+        db_path=settings.data_dir / "sparse_index.db"
+    )
+    logger.info("SparseIndex (FTS5/BM25) active at %s", settings.data_dir / "sparse_index.db")
+
+    # ── 2.7 Initialise SessionStore + ExportEngine ────────────────
+    from src.modules.session_store import SessionStore
+    from src.modules.export_engine import ExportEngine
+    state.session_store = SessionStore(
+        db_path=settings.data_dir / "sessions.db"
+    )
+    state.export_engine = ExportEngine(state.session_store)
+    logger.info("SessionStore active at %s", settings.data_dir / "sessions.db")
 
     # ── 3. Initialise Silicon Colosseum (OPA + FSM) ───────────────
     state.colosseum = SiliconColosseum(settings)
@@ -157,11 +190,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _poller_task = asyncio.create_task(_watchtower_poller())
     logger.info("WatchTower psutil poller started")
 
+    # ── 7. Start StreamSync RSS & Directory Watchers ──────────────────
+    from src.modules.streamsync.rss_feeder import rss_poller_task
+    from src.modules.streamsync.directory_watcher import StreamSyncDirectoryWatcher
+    
+    # Load RSS feeds from settings
+    rss_state_file = settings.data_dir / "streamsync_rss_feeds.json"
+    if rss_state_file.exists():
+        try:
+            with open(rss_state_file, "r") as f:
+                state.streamsync_rss_feeds = json.load(f).get("feeds", [])
+        except Exception as e:
+            logger.error("Failed to load StreamSync RSS feeds: %s", e)
+    
+    _rss_poller_task = asyncio.create_task(rss_poller_task(app))
+    
+    live_folder = settings.data_dir / "LiveFolder"
+    loop = asyncio.get_running_loop()
+    state.directory_watcher = StreamSyncDirectoryWatcher(live_folder, loop)
+    state.directory_watcher.start()
+
+    # ── 8. Start Multi-Node Synchronizer ──────────────────────────────
+    from src.modules.sync.event_log import EventLog
+    from src.modules.sync.sync_manager import SyncManager
+    node_id_file = settings.data_dir / "node_id.txt"
+    if not node_id_file.exists():
+        node_id_file.write_text(str(uuid.uuid4()))
+    node_id = node_id_file.read_text().strip()
+
+    event_log = EventLog(settings.data_dir / "sync_events.db")
+    state.sync_manager = SyncManager(node_id, settings.aetherforge_port, event_log)
+    await state.sync_manager.start()
+
     yield  # ← Application runs here
 
     # ── Shutdown ──────────────────────────────────────────
     logger.info("AetherForge shutting down...")
     _poller_task.cancel()
+    _rss_poller_task.cancel()
+    if state.directory_watcher:
+        state.directory_watcher.stop()
+    if state.sync_manager:
+        await state.sync_manager.stop()
     state.scheduler.shutdown(wait=False)
     await state.replay_buffer.flush()
     logger.info("Shutdown complete.")
@@ -235,7 +305,39 @@ async def _watchtower_poller() -> None:
 # REST Endpoints
 # ─────────────────────────────────────────────────────────────────
 
-@app.get("/health", tags=["System"])
+@app.get("/api/v1/streamsync/rss", tags=["StreamSync"])
+async def get_rss_feeds() -> JSONResponse:
+    state: AppState = get_state(app)
+    return JSONResponse({"feeds": state.streamsync_rss_feeds})
+
+class RSSFeedRequest(BaseModel):
+    url: str
+
+@app.post("/api/v1/streamsync/rss", tags=["StreamSync"])
+async def add_rss_feed(req: RSSFeedRequest) -> JSONResponse:
+    state: AppState = get_state(app)
+    if req.url not in state.streamsync_rss_feeds:
+        state.streamsync_rss_feeds.append(req.url)
+        rss_state_file = state.settings.data_dir / "streamsync_rss_feeds.json"
+        with open(rss_state_file, "w") as f:
+            json.dump({"feeds": state.streamsync_rss_feeds}, f)
+        from src.modules.streamsync.graph import emit_event
+        emit_event("rss_feed_added", payload={"url": req.url}, source="System")
+    return JSONResponse({"status": "success", "feeds": state.streamsync_rss_feeds})
+
+@app.delete("/api/v1/streamsync/rss", tags=["StreamSync"])
+async def remove_rss_feed(req: RSSFeedRequest) -> JSONResponse:
+    state: AppState = get_state(app)
+    if req.url in state.streamsync_rss_feeds:
+        state.streamsync_rss_feeds.remove(req.url)
+        rss_state_file = state.settings.data_dir / "streamsync_rss_feeds.json"
+        with open(rss_state_file, "w") as f:
+            json.dump({"feeds": state.streamsync_rss_feeds}, f)
+        from src.modules.streamsync.graph import emit_event
+        emit_event("rss_feed_removed", payload={"url": req.url}, source="System")
+    return JSONResponse({"status": "success", "feeds": state.streamsync_rss_feeds})
+
+@app.get("/api/v1/health", tags=["System"])
 async def health() -> JSONResponse:
     """
     Lightweight health check used by run_dev.sh and Tauri startup
@@ -266,12 +368,47 @@ async def system_status() -> JSONResponse:
         "modules": ["ragforge", "localbuddy", "watchtower", "streamsync", "tunelab"],
     })
 
+@app.get("/api/v1/ragforge/documents", tags=["RAGForge"])
+async def list_rag_documents() -> JSONResponse:
+    """Returns a list of all distinct documents currently indexed in ChromaDB."""
+    state: AppState = get_state(app)
+    if not state.vector_store:
+        return JSONResponse({"documents": []})
 
+    try:
+        col = state.vector_store._collection
+        res = await asyncio.to_thread(col.get, include=["metadatas"])
+        metadatas = res.get("metadatas", [])
+        
+        doc_map = {}
+        for m in metadatas:
+            if not m: continue
+            src = m.get("source")
+            if not src: continue
+            doc_map[src] = doc_map.get(src, 0) + 1
+            
+        docs = []
+        for src, count in doc_map.items():
+            docs.append({
+                "name": src,
+                "status": "Ready",
+                "tokens": f"~{count} chunks",
+                "active": True
+            })
+            
+        return JSONResponse({"documents": docs})
+    except Exception as e:
+        logger.error("Failed to list ragforge documents: %s", e)
+        return JSONResponse({"documents": []})
 @app.post("/api/v1/ragforge/upload", tags=["RAGForge"])
 async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
     """
     Ingest a document (PDF, MD, CSV, TXT) into the local vector DB.
-    Triggered when a user drags and drops a file into the RAGForge Vault.
+    
+    Pipeline:
+      1. Save file to disk
+      2. Docling text extraction + embedding (fast, <1 min) → returns immediately  
+      3. VLM figure extraction (background async) → enriches index while user queries
     """
     state: AppState = get_state(app)
     if not file.filename:
@@ -286,30 +423,432 @@ async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # Vectorize and index in a background thread to avoid blocking the event loop
+        # ── Fast path: text extraction + embedding (<1 min) ──────
         from src.modules.ragforge_indexer import index_document
-        result = await asyncio.to_thread(index_document, file_path, state.vector_store)
+        result = await asyncio.to_thread(
+            index_document, file_path, state.vector_store, state.sparse_index
+        )
 
-        # result is a dict: {file, chunks_added, parser, chunk_breakdown}
         chunks_added = result.get("chunks_added", 0) if isinstance(result, dict) else int(result)
         parser = result.get("parser", "unknown") if isinstance(result, dict) else "legacy"
         breakdown = result.get("chunk_breakdown", {}) if isinstance(result, dict) else {}
+        image_pages = result.get("image_pages", []) if isinstance(result, dict) else []
 
         logger.info(
             "Indexed '%s' — %d chunks via %s | breakdown=%s",
             file.filename, chunks_added, parser, breakdown,
         )
+
+        # ── Async VLM: enrich figures in background ──────────────
+        if image_pages and file_path.suffix.lower() == ".pdf" and getattr(state, "selected_vlm_id", None):
+            asyncio.create_task(
+                _async_vlm_enrich(
+                    file_path, image_pages, state.vector_store,
+                    state.selected_vlm_id, state.sparse_index
+                )
+            )
+            logger.info("VLM background task spawned for %d image pages", len(image_pages))
+
         return JSONResponse({
             "status": "success",
             "chunks_indexed": chunks_added,
             "parser": parser,
             "chunk_breakdown": breakdown,
             "file": file.filename,
+            "vlm_background": len(image_pages) > 0 and bool(state.selected_vlm_id),
         })
     except Exception as e:
         logger.exception("Failed to process RAG document %s", file.filename)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
+
+
+# ════════════════════════════════════════════════════════════════
+# Session Management API
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/sessions", tags=["Sessions"])
+async def list_sessions(
+    request: Request,
+    module: str | None = None,
+) -> JSONResponse:
+    """List all chat sessions, optionally filtered by module."""
+    state: AppState = request.app.state.app_state
+    sessions = state.session_store.list_sessions(module=module)
+    return JSONResponse([
+        {
+            "id": s.id,
+            "module": s.module,
+            "title": s.title,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+            "message_count": s.message_count,
+        }
+        for s in sessions
+    ])
+
+
+@app.delete("/api/v1/sessions/{session_id}", tags=["Sessions"])
+async def delete_session(session_id: str, request: Request) -> JSONResponse:
+    """Delete a session and all its messages."""
+    state: AppState = request.app.state.app_state
+    state.session_store.delete_session(session_id)
+    # Also evict from in-process MetaAgent memory cache
+    state.meta_agent._session_memories.pop(session_id, None)
+    return JSONResponse({"status": "deleted", "session_id": session_id})
+
+
+class RenameSessionRequest(BaseModel):
+    title: str
+
+
+@app.patch("/api/v1/sessions/{session_id}", tags=["Sessions"])
+async def rename_session(
+    session_id: str,
+    req: RenameSessionRequest,
+    request: Request,
+) -> JSONResponse:
+    """Rename a session."""
+    state: AppState = request.app.state.app_state
+    state.session_store.rename_session(session_id, req.title)
+    return JSONResponse({"status": "renamed", "session_id": session_id, "title": req.title})
+
+
+@app.get("/api/v1/sessions/{session_id}/messages", tags=["Sessions"])
+async def get_session_messages(session_id: str, request: Request) -> JSONResponse:
+    """Return all messages for a session (for UI history reload)."""
+    state: AppState = request.app.state.app_state
+    messages = state.session_store.get_messages(session_id)
+    return JSONResponse([
+        {
+            "id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "ts": m.ts,
+            "metadata": m.metadata,
+        }
+        for m in messages
+    ])
+
+
+# ════════════════════════════════════════════════════════════════
+# Export API  (MD + PDF)
+# ════════════════════════════════════════════════════════════════
+
+from fastapi.responses import Response as FastAPIResponse
+
+
+@app.get("/api/v1/sessions/{session_id}/export", tags=["Export"])
+async def export_session(
+    session_id: str,
+    request: Request,
+    format: str = "md",               # "md" | "pdf"
+    message_id: str | None = None,    # If set, export only this message
+) -> FastAPIResponse:
+    """
+    Export a full session (or a single message) as Markdown or PDF.
+
+    Query params:
+        format=md   → returns a .md file download
+        format=pdf  → returns a .pdf file download
+        message_id  → if provided, export only that single AI response
+    """
+    state: AppState = request.app.state.app_state
+    engine = state.export_engine
+    safe_id = session_id[:8]
+
+    try:
+        if format == "pdf":
+            if message_id:
+                content = await asyncio.to_thread(
+                    engine.message_to_pdf, session_id, message_id
+                )
+                filename = f"aetherforge_response_{safe_id}.pdf"
+            else:
+                content = await asyncio.to_thread(
+                    engine.session_to_pdf, session_id
+                )
+                filename = f"aetherforge_session_{safe_id}.pdf"
+            return FastAPIResponse(
+                content=content,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        else:
+            # Default: markdown
+            if message_id:
+                content = engine.message_to_markdown(session_id, message_id)
+                filename = f"aetherforge_response_{safe_id}.md"
+            else:
+                content = engine.session_to_markdown(session_id)
+                filename = f"aetherforge_session_{safe_id}.md"
+            return FastAPIResponse(
+                content=content.encode("utf-8"),
+                media_type="text/markdown",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+    except Exception as e:
+        logger.error("Export failed for session %s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail=f"Export failed: {e}") from e
+
+
+@app.get("/api/v1/ragforge/vlm-options", tags=["RAGForge"])
+async def get_vlm_options() -> JSONResponse:
+    """Returns available VLM providers with hardware recommendations."""
+    from src.modules.ragforge.vlm_provider import list_providers
+    options = []
+    
+    # Get total system RAM to suggest safety
+    total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+    avail_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+    
+    for p in list_providers():  # uses singleton registry — no torch re-init
+        is_safe = p.required_ram_gb < avail_ram_gb * 0.75  # leave 25% headroom
+        options.append({
+            "id": p.id,
+            "name": p.name,
+            "tier": p.tier,
+            "required_ram_gb": p.required_ram_gb,
+            "hardware_rating": "safe" if is_safe else "warning",
+        })
+        
+    return JSONResponse({"options": options})
+
+class VLMSelectRequest(BaseModel):
+    vlm_id: str
+
+@app.post("/api/v1/ragforge/vlm-select", tags=["RAGForge"])
+async def select_vlm(req: VLMSelectRequest) -> JSONResponse:
+    """Selects the active VLM and triggers background compilation/download."""
+    from src.modules.ragforge.vlm_provider import get_vlm_provider
+    state: AppState = get_state(app)
+    
+    provider = get_vlm_provider(req.vlm_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"VLM ID '{req.vlm_id}' not found")
+        
+    state.selected_vlm_id = req.vlm_id
+    logger.info("VLM Selection updated: %s", req.vlm_id)
+    
+    # Optionally trigger background load to pre-warm
+    asyncio.create_task(provider.load_model())
+    
+    return JSONResponse({"status": "success", "selected": req.vlm_id})
+
+
+class ChatModelSelectRequest(BaseModel):
+    model_id: str
+
+@app.get("/api/v1/chat-models", tags=["System"])
+async def get_chat_models() -> JSONResponse:
+    """Returns available optimized chat models for the 8GB RAM constraint."""
+    state: AppState = get_state(app)
+    
+    models = [
+        {"id": "bitnet-2b", "name": "BitNet b1.58 2B (Default)"},
+        {"id": "gemma2-2b", "name": "Gemma 2 2B (INT4)"},
+        {"id": "llama3.2-3b", "name": "Llama 3.2 3B (INT4)"}
+    ]
+    
+    # Check if the active model filename contains the id keywords to set current selection
+    active_name = state.settings.bitnet_model_path.name.lower()
+    selected = "bitnet-2b"
+    if "gemma" in active_name:
+        selected = "gemma2-2b"
+    elif "llama" in active_name:
+        selected = "llama3.2-3b"
+        
+    return JSONResponse({
+        "models": models,
+        "selected": selected
+    })
+
+@app.post("/api/v1/chat-model-select", tags=["System"])
+async def select_chat_model(req: ChatModelSelectRequest) -> JSONResponse:
+    state: AppState = get_state(app)
+    try:
+        await state.engine.meta_agent.switch_model(req.model_id)
+        return JSONResponse({"status": "success", "selected": req.model_id})
+    except Exception as e:
+        logger.error("Model switch failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _async_vlm_enrich(
+    file_path: "Path",
+    image_pages: list[int],
+    vector_store: Any,
+    vlm_id: str,
+    sparse_index: Any,
+) -> None:
+    """
+    Background task: run selected VLM on image-bearing pages.
+    Dynamically instantiates the VLM, processes images sequentially,
+    and unloads the model when done to free RAM.
+    Uses the AppState-shared sparse_index to ensure VLM chunks are
+    written to the same database that the query path reads from.
+    """
+    if not image_pages:
+        return
+
+    # ── Memory Governor check ────────────────────────────────────
+    # CRITICAL: Ollama runs as a SEPARATE OS process and does NOT consume
+    # Python in-process RAM. Use a higher ceiling (97%) for Ollama-based VLMs.
+    # In-process HuggingFace VLMs (SmolVLM, Florence, QwenVL) use 85%.
+    from src.modules.ragforge_indexer import MEMORY_CEILING_PCT, MEMORY_CEILING_PCT_OLLAMA
+    import psutil as _psutil
+    is_ollama_provider = "ollama" in vlm_id.lower()
+    ceiling = MEMORY_CEILING_PCT_OLLAMA if is_ollama_provider else MEMORY_CEILING_PCT
+    mem_pct = _psutil.virtual_memory().percent
+    if mem_pct >= ceiling:
+        logger.warning(
+            "⚠️  VLM enrichment skipped for '%s' — memory at %.1f%% (ceiling: %.0f%% for %s)",
+            file_path.name, mem_pct, ceiling, "Ollama" if is_ollama_provider else "in-process VLM"
+        )
+        return
+    logger.info(
+        "VLM enrichment approved for '%s' — memory %.1f%% / ceiling %.0f%% (provider: %s)",
+        file_path.name, mem_pct, ceiling, vlm_id
+    )
+        
+    try:
+        from src.modules.ragforge.vlm_provider import get_vlm_provider
+        vlm = get_vlm_provider(vlm_id)
+        if not vlm:
+            logger.error("VLM enrichment failed: unknown provider %s", vlm_id)
+            return
+            
+        logger.info("VLM background: starting enrichment for %d pages using %s",
+                    len(image_pages), vlm.name)
+                    
+        import fitz
+        from langchain_core.documents import Document
+        import uuid as uuid_mod
+        
+        pdf_doc = fitz.open(str(file_path))
+        extracted_chunks = []
+        
+        for page_num in image_pages:
+            if page_num >= len(pdf_doc):
+                continue
+
+            # Check memory before each page — stop early if system is under pressure
+            # Uses the same Ollama-aware ceiling computed at enrichment start
+            if _psutil.virtual_memory().percent >= ceiling:
+                logger.warning("VLM stopping early at page %d — memory pressure (%.1f%% >= %.0f%%)",
+                               page_num, _psutil.virtual_memory().percent, ceiling)
+                break
+                
+            page = pdf_doc[page_num]
+            # Use 1x resolution (144 DPI). 2x = 6MB/page wasted RAM;
+            # SmolVLM/Florence downsample internally to 384/512px anyway.
+            mat = fitz.Matrix(1.0, 1.0)
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes("png")
+            
+            # Analyze page with the VLM
+            try:
+                prompt = (
+                    "Analyze this page. First, identify the type of content "
+                    "(e.g., Academic Graph, Astrological Chart, Financial Table, Flowchart, Diagram). "
+                    "Then, extract all data, labels, symbols, text, and logical relationships present "
+                    "in extreme detail. Structure the output clearly. "
+                    "If there are absolutely no visual figures, charts, or tables, output 'NO_FIGURES'."
+                )
+                analysis = await vlm.analyze_image(img_bytes, prompt)
+                
+                if analysis and "NO_FIGURES" not in analysis:
+                    extracted_chunks.append(Document(
+                        page_content=f"Visual Analysis of Page {page_num + 1}:\n{analysis}",
+                        metadata={
+                            "source": file_path.name,
+                            "chunk_type": "vlm_analysis",
+                            "page": page_num,
+                            "chunk_id": str(uuid_mod.uuid4()),
+                            "vlm_provider": vlm.id
+                        }
+                    ))
+            except Exception as e:
+                logger.warning("VLM failed on page %d: %s", page_num + 1, e)
+                
+            del pix, img_bytes
+            
+        pdf_doc.close()
+        
+        # Aggressive unload to return RAM to LLM / WatchTower
+        await vlm.unload_model()
+        
+        if extracted_chunks:
+            source_name = file_path.name
+            
+            # ── Tiered VLM chunk preservation ────────────────────────
+            # VLM tier order: Qwen3.5 (Ultra) > Florence (Standard) > SmolVLM (Lite)
+            # If a higher-tier VLM has already analyzed this source, keep its chunks
+            # and discard the new lower-quality ones. This means:
+            # - Switching from Qwen → SmolVLM keeps the Qwen visual analysis.
+            # - Running SmolVLM then upgrading to Qwen → Qwen replaces SmolVLM.
+            VLM_TIER_RANK = {
+                "smolvlm-256m": 1,
+                "florence-2": 2,
+                "ollama-qwen3.5-9b": 3,
+            }
+            current_rank = VLM_TIER_RANK.get(vlm.id, 1)
+            
+            existing_best_tier = 0
+            if sparse_index is not None:
+                try:
+                    # Check what VLM tier has already indexed this source
+                    existing = sparse_index.get_vlm_chunks(source_name)
+                    for doc in existing:
+                        ex_provider = doc.metadata.get("vlm_provider", "")
+                        ex_rank = VLM_TIER_RANK.get(ex_provider, 0)
+                        existing_best_tier = max(existing_best_tier, ex_rank)
+                except Exception:
+                    pass
+            
+            if existing_best_tier > current_rank:
+                logger.info(
+                    "VLM tiering: skipping %s chunks (tier %d) — "
+                    "higher-quality tier-%d analysis already exists for '%s'",
+                    vlm.id, current_rank, existing_best_tier, source_name
+                )
+            else:
+                # Delete existing VLM chunks for this source (same or lower tier)
+                # and insert the new ones
+                if sparse_index is not None:
+                    try:
+                        sparse_index.delete_vlm_chunks(source_name)
+                    except Exception:
+                        pass
+                
+                # Also clear existing VLM chunks from ChromaDB for this source
+                try:
+                    existing_chroma = vector_store.get(where={
+                        "$and": [{"source": source_name}, {"chunk_type": "vlm_analysis"}]
+                    })
+                    if existing_chroma and existing_chroma.get("ids"):
+                        vector_store.delete(ids=existing_chroma["ids"])
+                except Exception:
+                    pass
+                
+                # Add new VLM chunks to ChromaDB
+                vector_store.add_documents(extracted_chunks)
+                
+                # Add to FTS5 sparse index via the shared AppState singleton
+                if sparse_index is not None:
+                    try:
+                        sparse_index.add_documents(extracted_chunks)
+                    except Exception as sparse_err:
+                        logger.warning("VLM sparse index write failed: %s", sparse_err)
+                
+                logger.info(
+                    "VLM background: enriched index with %d visual chunks (provider: %s, tier: %d)",
+                    len(extracted_chunks), vlm.id, current_rank
+                )
+        else:
+            logger.info("VLM background: no visual chunks extracted")
+    except Exception as e:
+        logger.error("VLM background enrichment failed: %s", e)
 
 # ── Chat Request / Response models ────────────────────────────────
 class ChatRequest(BaseModel):
@@ -343,11 +882,33 @@ async def chat(request: ChatRequest) -> ChatResponse:
     meta-agent, which:
       1. Selects the appropriate module graph
       2. Runs every tool call through Silicon Colosseum
-      3. Records the interaction in the replay buffer
+      3. Records the interaction in the replay buffer + SessionStore
       4. Returns response with optional X-Ray trace
     """
     state: AppState = get_state(app)
     t0 = time.perf_counter()
+    session_store = state.session_store
+
+    # ── Session bootstrap ─────────────────────────────────────────
+    # Ensure the session exists in the DB; create it if new.
+    # If the server restarted, hydrate MetaAgent memory from persisted history.
+    if not session_store.session_exists(request.session_id):
+        session_store.create_session(
+            module=request.module,
+            session_id=request.session_id,
+        )
+    elif request.session_id not in state.meta_agent._session_memories:
+        # Server restarted — restore memory from DB so the LLM has context
+        try:
+            restored = session_store.to_langchain_messages(request.session_id)
+            if restored:
+                state.meta_agent._session_memories[request.session_id] = restored
+                logger.info(
+                    "Restored %d messages for session %s from SessionStore",
+                    len(restored), request.session_id[:8]
+                )
+        except Exception as hydrate_err:
+            logger.warning("Session hydration failed (non-fatal): %s", hydrate_err)
 
     try:
         result = await state.meta_agent.run(
@@ -367,6 +928,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
         ) from exc
 
     latency_ms = (time.perf_counter() - t0) * 1000
+
+    # ── Persist this turn to SessionStore (non-blocking) ──────────
+    def _persist():
+        try:
+            meta = {
+                "module": request.module,
+                "latency_ms": round(latency_ms, 2),
+                "faithfulness_score": result.faithfulness_score,
+            }
+            session_store.append_message(request.session_id, "user", request.message)
+            session_store.append_message(request.session_id, "assistant", result.response, meta)
+        except Exception as pe:
+            logger.warning("Session persist failed (non-fatal): %s", pe)
+
+    asyncio.create_task(asyncio.to_thread(_persist))
 
     # Record to replay buffer (async, non-blocking)
     asyncio.create_task(
@@ -623,9 +1199,8 @@ async def trigger_rca(req: AnalyzeRequest) -> JSONResponse:
     anomalies = [{"metric": req.metric, "value": req.value, "z_score": req.z_score}]
     
     # Run RCA synchronously in a thread so we don't block the ASGI loop
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, 
-        lambda: agent.analyze(issue=issue, context=req.context_, anomalies=anomalies)
+    result = await asyncio.to_thread(
+        agent.analyze, issue, req.context_, [anomalies[0]]
     )
     return JSONResponse(result.to_dict())
 
@@ -736,6 +1311,80 @@ async def _nightly_oplora_job(app_: FastAPI, force: bool = False) -> None:
         logger.info("%sOPLoRA complete.", "Forced " if force else "Nightly ")
     except Exception as exc:
         logger.exception("OPLoRA failed: %s", exc)
+
+
+# ════════════════════════════════════════════════════════════════
+# MULTI NODE SYNC API
+# ════════════════════════════════════════════════════════════════
+
+@app.websocket("/api/v1/sync/ws/{peer_node_id}")
+async def sync_websocket_endpoint(websocket: WebSocket, peer_node_id: str):
+    """
+    WebSocket endpoint for incoming P2P CRDT sync connections.
+    """
+    state: AppState = websocket.app.state.app_state
+    if not state.sync_manager:
+        await websocket.close(code=1011, reason="Sync engine offline")
+        return
+    await state.sync_manager.handle_websocket(websocket, peer_node_id)
+
+@app.get("/api/v1/sync/info", tags=["Sync"])
+async def sync_get_info(request: Request) -> JSONResponse:
+    """Returns the Node ID, active peers, and QR connection string."""
+    state: AppState = request.app.state.app_state
+    if not state.sync_manager:
+        return JSONResponse({"status": "offline"})
+
+    # In a real app the ephemeral key would be bound to a short-lived memory session.
+    # For now, we generate one to encode in the QR.
+    from src.modules.sync.crypto import SyncCrypto
+    ephemeral_key = SyncCrypto.generate_key()
+    
+    # Authorize it locally for when the peer scans it
+    uri = SyncCrypto.create_pairing_uri(
+        ip=state.sync_manager.discovery.get_local_ip(),
+        port=state.sync_manager.port,
+        node_id=state.sync_manager.node_id,
+        key_b64=ephemeral_key
+    )
+
+    return JSONResponse({
+        "status": "online",
+        "node_id": state.sync_manager.node_id,
+        "pairing_uri": uri,
+        "ephemeral_key": ephemeral_key,
+        "peers": state.sync_manager.discovery.get_active_peers(),
+        "authorized": list(state.sync_manager.authorized_peers.keys())
+    })
+
+@app.post("/api/v1/sync/pair", tags=["Sync"])
+async def sync_pair_device(request: Request) -> JSONResponse:
+    """Pairs a new device using a scanned pairing URI."""
+    state: AppState = request.app.state.app_state
+    if not state.sync_manager:
+        return JSONResponse({"status": "offline"}, status_code=500)
+
+    try:
+        body = await request.json()
+        uri = body.get("uri")
+        if not uri:
+            return JSONResponse({"error": "Missing 'uri' payload"}, status_code=400)
+
+        from src.modules.sync.crypto import SyncCrypto
+        parsed = SyncCrypto.parse_pairing_uri(uri)
+        
+        peer_node_id = parsed["node_id"]
+        key_b64 = parsed["key"]
+        
+        # Authorize the peer so we can accept its websockets
+        state.sync_manager.authorize_peer(peer_node_id, key_b64)
+
+        return JSONResponse({
+            "status": "paired",
+            "peer": peer_node_id
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
 
 # ── CLI Entry (typer) ─────────────────────────────────────────────

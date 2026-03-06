@@ -14,10 +14,14 @@
 #   chunk's embedding. If the average similarity is below the threshold,
 #   the answer may have drifted from the source material (hallucination risk).
 #
-# Faithfulness Score:
-#   ≥ 0.72 → GROUNDED  (answer is semantically consistent with sources)
-#   < 0.72 → LOW_CONFIDENCE (answer may contain hallucinations)
-#   < 0.45 → LIKELY_HALLUCINATION (answer barely relates to sources)
+# Faithfulness Score (calibrated for CognitiveRAG synthesized answers):
+#   ≥ 0.55 → GROUNDED  (answer is semantically consistent with sources)
+#   < 0.55 → LOW_CONFIDENCE (answer may contain hallucinations)
+#   < 0.30 → LIKELY_HALLUCINATION (answer barely relates to sources)
+#
+# Note: CognitiveRAG produces chain-of-thought synthesized answers that
+# naturally have lower cosine similarity to raw chunks than verbatim
+# retrieval. The thresholds are tuned accordingly.
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
@@ -27,10 +31,10 @@ from typing import Any
 
 logger = logging.getLogger("aetherforge.ragforge.samr_lite")
 
-# Thresholds (tuned for academic/research content)
-GROUNDED_THRESHOLD = 0.72       # answer is grounded in sources
-LOW_CONFIDENCE_THRESHOLD = 0.45  # answer is questionable
-DEFAULT_DIMS = 1024              # BGE-M3 embedding dimensions
+# Thresholds (tuned for CognitiveRAG chain-of-thought synthesized answers)
+GROUNDED_THRESHOLD = 0.55       # answer is grounded in sources
+LOW_CONFIDENCE_THRESHOLD = 0.30  # answer is questionable
+DEFAULT_DIMS = 384              # all-MiniLM-L6-v2 embedding dimensions
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -54,8 +58,8 @@ def compute_faithfulness(
     Core SAMR-lite computation.
 
     Args:
-        answer_embedding:   BGE-M3 embedding of the generated answer
-        context_embeddings: BGE-M3 embeddings of the retrieved source chunks
+        answer_embedding:   all-MiniLM-L6-v2 embedding of the generated answer
+        context_embeddings: all-MiniLM-L6-v2 embeddings of the retrieved source chunks
         threshold:          Minimum score to be considered "grounded"
 
     Returns:
@@ -149,8 +153,8 @@ def run_samr_lite(
     Args:
         answer:             The LLM-generated answer string
         retrieved_docs:     List of source document chunk texts
-        embedding_function: LangChain embedding model (BGE-M3)
-        threshold:          Faithfulness threshold (default: 0.72)
+        embedding_function: LangChain embedding model (all-MiniLM-L6-v2)
+        threshold:          Faithfulness threshold (default: 0.55)
     """
     try:
         # Embed answer and all retrieved chunks

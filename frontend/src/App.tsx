@@ -1,5 +1,25 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import QRCode from "react-qr-code";
 import "./index.css";
+import MarkdownIt from 'markdown-it';
+import hljs from 'highlight.js';
+import 'highlight.js/styles/github-dark.css';
+
+const md = new MarkdownIt({
+    html: true,
+    linkify: true,
+    typographer: true,
+    highlight: function (str, lang) {
+        if (lang && hljs.getLanguage(lang)) {
+            try {
+                return '<pre class="hljs"><code class="hljs">' +
+                    hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+                    '</code></pre>';
+            } catch (__) { }
+        }
+        return '<pre class="hljs"><code class="hljs">' + md.utils.escapeHtml(str) + '</code></pre>';
+    }
+});
 
 // ── Types ────────────────────────────────────────────────────────
 interface Message {
@@ -33,6 +53,23 @@ interface Module {
     name: string;
     icon: string;
     desc: string;
+}
+
+interface SessionSummary {
+    id: string;
+    module: string;
+    title: string;
+    created_at: number;
+    updated_at: number;
+    message_count: number;
+}
+
+interface StoredMessage {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    ts: number;
+    metadata: Record<string, unknown>;
 }
 
 // ── Constants ────────────────────────────────────────────────────
@@ -80,10 +117,92 @@ const MODULE_SUGGESTIONS: Record<string, string[]> = {
 // ── Main App ─────────────────────────────────────────────────────
 export default function App() {
     const [activeModule, setActiveModule] = useState("localbuddy");
-    const [activePanel, setActivePanel] = useState<"chat" | "insights" | "policies">("chat");
+    const [activePanel, setActivePanel] = useState<"chat" | "insights" | "policies" | "sync">("chat");
     const [xrayOpen, setXrayOpen] = useState(false);
     const [online, setOnline] = useState(false);
     const [cpuPct, setCpuPct] = useState<number | null>(null);
+
+    // ── Chat Model State ──────────────────────────────────────────
+    const [chatModels, setChatModels] = useState<any[]>([]);
+    const [selectedChatModel, setSelectedChatModel] = useState<string>("");
+    const [isChangingChatModel, setIsChangingChatModel] = useState(false);
+    const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+
+    useEffect(() => {
+        fetch("/api/v1/chat-models").then(r => r.json()).then(d => {
+            setChatModels(d.models || []);
+            if (d.selected) setSelectedChatModel(d.selected);
+        }).catch(() => { });
+    }, []);
+
+    const handleChatModelChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const model_id = e.target.value;
+        setSelectedChatModel(model_id);
+        setIsChangingChatModel(true);
+        try {
+            await fetch("/api/v1/chat-model-select", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ model_id })
+            });
+        } catch (err) { console.error(err); }
+        finally { setIsChangingChatModel(false); }
+    };
+
+    // ── Session state ─────────────────────────────────────────────
+    const [sessions, setSessions] = useState<SessionSummary[]>([]);
+    const [sessionsPanelOpen, setSessionsPanelOpen] = useState(true);
+    const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+    const [loadedSessionMessages, setLoadedSessionMessages] = useState<StoredMessage[] | null>(null);
+    const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+    const [editingTitle, setEditingTitle] = useState("");
+
+    const refreshSessions = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/v1/sessions?module=${activeModule}`);
+            if (res.ok) setSessions(await res.json());
+        } catch { /* non-fatal */ }
+    }, [activeModule]);
+
+    useEffect(() => { refreshSessions(); }, [refreshSessions]);
+
+    const loadSession = async (sessionId: string) => {
+        setActiveSessionId(sessionId);
+        try {
+            const res = await fetch(`/api/v1/sessions/${sessionId}/messages`);
+            if (res.ok) setLoadedSessionMessages(await res.json());
+        } catch { /* non-fatal */ }
+    };
+
+    const deleteSession = async (sessionId: string) => {
+        if (!confirm("Delete this session and all its messages?")) return;
+        await fetch(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
+        setSessions(s => s.filter(x => x.id !== sessionId));
+        if (activeSessionId === sessionId) {
+            setActiveSessionId(null);
+            setLoadedSessionMessages(null);
+        }
+    };
+
+    const startRename = (s: SessionSummary) => {
+        setEditingSessionId(s.id);
+        setEditingTitle(s.title);
+    };
+
+    const commitRename = async (sessionId: string) => {
+        if (!editingTitle.trim()) return;
+        await fetch(`/api/v1/sessions/${sessionId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: editingTitle.trim() }),
+        });
+        setSessions(s => s.map(x => x.id === sessionId ? { ...x, title: editingTitle.trim() } : x));
+        setEditingSessionId(null);
+    };
+
+    const exportSession = (sessionId: string, format: "md" | "pdf") => {
+        window.open(`/api/v1/sessions/${sessionId}/export?format=${format}`, "_blank");
+    };
 
     // Health polling
     useEffect(() => {
@@ -112,6 +231,37 @@ export default function App() {
                 </div>
 
                 <div className="header-pills">
+                    {/* Web Search Toggle */}
+                    <div
+                        style={{ display: "flex", alignItems: "center", gap: "6px", background: "var(--bg-elevated)", padding: "4px 8px", borderRadius: "12px", border: "1px solid var(--border)", cursor: "pointer" }}
+                        onClick={() => setWebSearchEnabled(!webSearchEnabled)}
+                        title="Allow the Agent to search the live web for answers"
+                    >
+                        <span style={{ fontSize: "11px", color: webSearchEnabled ? "var(--brand-glow)" : "var(--text-muted)", fontWeight: 600 }}>🌐 Web Grounding</span>
+                        <div style={{ width: "24px", height: "14px", background: webSearchEnabled ? "rgba(0,255,100,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "12px", position: "relative", transition: "all 0.2s", border: webSearchEnabled ? "1px solid rgba(0,255,100,0.3)" : "none" }}>
+                            <div style={{ width: "10px", height: "10px", background: webSearchEnabled ? "var(--brand-glow)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "1px", left: webSearchEnabled ? "12px" : "2px", transition: "all 0.2s" }} />
+                        </div>
+                    </div>
+
+                    {chatModels.length > 0 && (
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", background: "var(--bg-elevated)", padding: "4px 8px", borderRadius: "12px", border: "1px solid var(--border)" }}>
+                            <span style={{ fontSize: "11px", color: "var(--aether)", fontWeight: 600 }}>Chat Brain:</span>
+                            <select
+                                value={selectedChatModel}
+                                onChange={handleChatModelChange}
+                                disabled={isChangingChatModel}
+                                style={{
+                                    background: "transparent", color: "var(--fg)", border: "none", outline: "none", fontSize: "12px",
+                                    cursor: isChangingChatModel ? "wait" : "pointer", paddingRight: "4px"
+                                }}
+                            >
+                                {isChangingChatModel && <option value={selectedChatModel}>Downloading... (this will take a minute)</option>}
+                                {!isChangingChatModel && chatModels.map(m => (
+                                    <option key={m.id} value={m.id}>{m.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
                     {cpuPct !== null && (
                         <div className="status-pill">CPU {cpuPct.toFixed(0)}%</div>
                     )}
@@ -137,7 +287,7 @@ export default function App() {
                         <button
                             key={m.id}
                             className={`module-btn ${activeModule === m.id && activePanel === "chat" ? "active" : ""}`}
-                            onClick={() => { setActiveModule(m.id); setActivePanel("chat"); }}
+                            onClick={() => { setActiveModule(m.id); setActivePanel("chat"); refreshSessions(); }}
                         >
                             <div className="module-icon">{m.icon}</div>
                             <div className="module-info">
@@ -162,13 +312,79 @@ export default function App() {
                         onClick={() => setActivePanel("policies")}>
                         🛡️ Policies
                     </button>
+                    <button className={`nav-btn ${activePanel === "sync" ? "active" : ""}`}
+                        onClick={() => setActivePanel("sync")}>
+                        🔗 Sync Devices
+                    </button>
+
+                    {/* ── Session History Panel ─────────────────── */}
+                    <div className="sidebar-divider" />
+                    <button
+                        className="sidebar-section-label session-panel-toggle"
+                        onClick={() => setSessionsPanelOpen(v => !v)}
+                        style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", background: "none", border: "none", color: "inherit", width: "100%", padding: 0 }}
+                    >
+                        <span>{sessionsPanelOpen ? "▾" : "▸"}</span>
+                        <span>Session History</span>
+                    </button>
+
+                    {sessionsPanelOpen && (
+                        <div className="session-list">
+                            {sessions.length === 0 && (
+                                <div className="session-empty">No sessions yet. Start chatting!</div>
+                            )}
+                            {sessions.map(s => (
+                                <div
+                                    key={s.id}
+                                    className={`session-item ${activeSessionId === s.id ? "active" : ""}`}
+                                    onClick={() => loadSession(s.id)}
+                                >
+                                    <div className="session-item-body">
+                                        {editingSessionId === s.id ? (
+                                            <input
+                                                className="session-rename-input"
+                                                value={editingTitle}
+                                                autoFocus
+                                                onChange={e => setEditingTitle(e.target.value)}
+                                                onBlur={() => commitRename(s.id)}
+                                                onKeyDown={e => { if (e.key === "Enter") commitRename(s.id); if (e.key === "Escape") setEditingSessionId(null); }}
+                                                onClick={e => e.stopPropagation()}
+                                            />
+                                        ) : (
+                                            <div className="session-title" onDoubleClick={e => { e.stopPropagation(); startRename(s); }}>
+                                                {s.title}
+                                            </div>
+                                        )}
+                                        <div className="session-meta">
+                                            {new Date(s.updated_at * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                            {" · "}{s.message_count} msg
+                                        </div>
+                                    </div>
+                                    <div className="session-actions" onClick={e => e.stopPropagation()}>
+                                        <button title="Export MD" className="session-action-btn" onClick={() => exportSession(s.id, "md")}>⬇ MD</button>
+                                        <button title="Export PDF" className="session-action-btn" onClick={() => exportSession(s.id, "pdf")}>📄 PDF</button>
+                                        <button title="Delete" className="session-action-btn session-delete-btn" onClick={() => deleteSession(s.id)}>🗑</button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </aside>
 
                 {/* Main */}
                 <main className="main-panel">
-                    {activePanel === "chat" && <ChatPanel module={activeModule} xray={xrayOpen} onXrayData={() => { }} />}
+                    {activePanel === "chat" && <ChatPanel
+                        module={activeModule}
+                        xray={xrayOpen}
+                        onXrayData={() => { }}
+                        sessionId={activeSessionId}
+                        preloadedMessages={loadedSessionMessages}
+                        onSessionCreated={(id) => { setActiveSessionId(id); refreshSessions(); }}
+                        webSearchEnabled={webSearchEnabled}
+                    />}
                     {activePanel === "insights" && <InsightsPanel />}
                     {activePanel === "policies" && <PoliciesPanel />}
+                    {activePanel === "sync" && <SyncPanel />}
                 </main>
 
                 {/* X-Ray */}
@@ -189,6 +405,33 @@ export interface RAGDoc {
 
 function RAGForgeHUD({ docs, setDocs }: { docs: RAGDoc[], setDocs: React.Dispatch<React.SetStateAction<RAGDoc[]>> }) {
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [vlmOptions, setVlmOptions] = useState<any[]>([]);
+    const [selectedVlm, setSelectedVlm] = useState<string>("smolvlm-256m");
+    const [isSelectingVlm, setIsSelectingVlm] = useState(false);
+
+    useEffect(() => {
+        fetch("/api/v1/ragforge/vlm-options")
+            .then(res => res.json())
+            .then(data => setVlmOptions(data.options || []))
+            .catch(err => console.error("Failed to fetch VLM options", err));
+    }, []);
+
+    const handleVlmChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const vlm_id = e.target.value;
+        setSelectedVlm(vlm_id);
+        setIsSelectingVlm(true);
+        try {
+            await fetch("/api/v1/ragforge/vlm-select", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ vlm_id })
+            });
+        } catch (err) {
+            console.error("VLM select failed", err);
+        } finally {
+            setIsSelectingVlm(false);
+        }
+    };
 
     const handleUploadClick = () => {
         fileInputRef.current?.click();
@@ -239,9 +482,30 @@ function RAGForgeHUD({ docs, setDocs }: { docs: RAGDoc[], setDocs: React.Dispatc
 
     return (
         <div className="module-hud">
-            <div className="hud-header">
-                <div className="hud-title">🔍 Knowledge Vault</div>
-                <div className="hud-subtitle">Drag & drop files to expand local knowledge</div>
+            <div className="hud-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                    <div className="hud-title">🔍 Knowledge Vault</div>
+                    <div className="hud-subtitle">Drag & drop files to expand local knowledge</div>
+                </div>
+                <div style={{ textAlign: "right", fontSize: "12px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <div style={{ color: "var(--aether)" }}>Vision Language Model</div>
+                    <select
+                        value={selectedVlm}
+                        onChange={handleVlmChange}
+                        disabled={isSelectingVlm}
+                        style={{
+                            background: "var(--bg-elevated)", color: "var(--fg)",
+                            border: "1px solid var(--border)", padding: "4px 8px", borderRadius: "4px",
+                            cursor: isSelectingVlm ? "wait" : "pointer"
+                        }}
+                    >
+                        {vlmOptions.map(o => (
+                            <option key={o.id} value={o.id}>
+                                {o.name} {o.hardware_rating === "warning" ? "⚠️" : ""}
+                            </option>
+                        ))}
+                    </select>
+                </div>
             </div>
             <div style={{ display: "flex", gap: "16px" }}>
                 <input type="file" ref={fileInputRef} style={{ display: "none" }} onChange={handleFileChange} />
@@ -503,6 +767,8 @@ function WatchTowerHUD() {
 
 function StreamSyncHUD() {
     const [events, setEvents] = useState<any[]>([]);
+    const [rssFeeds, setRssFeeds] = useState<string[]>([]);
+    const [newFeedUrl, setNewFeedUrl] = useState("");
 
     useEffect(() => {
         const fetchEvents = async () => {
@@ -517,9 +783,56 @@ function StreamSyncHUD() {
             }
         };
 
+        const fetchFeeds = async () => {
+            try {
+                const res = await fetch("/api/v1/streamsync/rss");
+                if (res.ok) {
+                    const data = await res.json();
+                    setRssFeeds(data.feeds || []);
+                }
+            } catch (err) {
+                console.error("Failed to fetch RSS feeds", err);
+            }
+        };
+
+        fetchFeeds();
         const interval = setInterval(fetchEvents, 2000);
         return () => clearInterval(interval);
     }, []);
+
+    const handleAddFeed = async () => {
+        if (!newFeedUrl) return;
+        try {
+            const res = await fetch("/api/v1/streamsync/rss", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url: newFeedUrl })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setRssFeeds(data.feeds);
+                setNewFeedUrl("");
+            }
+        } catch (err) {
+            console.error("Failed to add RSS feed", err);
+        }
+    };
+
+    const handleRemoveFeed = async (url: string) => {
+        try {
+            const res = await fetch("/api/v1/streamsync/rss", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setRssFeeds(data.feeds);
+            }
+        } catch (err) {
+            console.error("Failed to remove RSS feed", err);
+        }
+    };
 
     const formatTime = (ts: number) => {
         const d = new Date(ts * 1000);
@@ -527,25 +840,92 @@ function StreamSyncHUD() {
     };
 
     return (
-        <div className="module-hud">
+        <div className="module-hud" style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
             <div className="hud-header">
-                <div className="hud-title">⚡ Event Stream Console</div>
-                <div className="hud-subtitle">Listening on POST /api/v1/events</div>
+                <div className="hud-title">⚡ StreamSync Connector Hub</div>
+                <div className="hud-subtitle">Live Data Ingestion Pipeline to RAGForge</div>
             </div>
-            <div className="event-console">
-                {events.length === 0 ? (
-                    <div style={{ color: "var(--text-muted)", fontSize: "12px", textAlign: "center", padding: "24px" }}>
-                        Waiting for events... Send a POST request to /api/v1/events
-                    </div>
-                ) : (
-                    events.map((e, i) => (
-                        <div key={i} className={`event-row`}>
-                            <span className="event-time">{formatTime(e.timestamp)}</span>
-                            <span className="event-source">[{e.source}]</span>
-                            <span className="event-payload">{JSON.stringify(e.payload)}</span>
+
+            {/* Live Folder Watcher Status */}
+            <div style={{ background: "rgba(20, 20, 30, 0.6)", padding: "16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
+                    <div style={{ color: "var(--plasma)", fontSize: "16px" }}>📁</div>
+                    <strong style={{ fontSize: "14px", color: "var(--text)" }}>Live Folder Auto-Sync</strong>
+                    <span style={{ marginLeft: "auto", fontSize: "11px", color: "var(--brand-glow)", background: "rgba(0,255,100,0.1)", padding: "2px 6px", borderRadius: "12px", border: "1px solid rgba(0,255,100,0.2)" }}>● Active</span>
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                    Watching your local <code>~/AetherForge/data/LiveFolder</code> directory. Any documents dropped here will automatically be indexed into your AI Brain immediately.
+                </div>
+            </div>
+
+            {/* RSS Feed Manager */}
+            <div style={{ background: "rgba(20, 20, 30, 0.6)", padding: "16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
+                    <div style={{ color: "var(--ember)", fontSize: "16px" }}>📻</div>
+                    <strong style={{ fontSize: "14px", color: "var(--text)" }}>RSS News Poller</strong>
+                    <span style={{ marginLeft: "auto", fontSize: "11px", color: "var(--text-muted)" }}>Polls every 30 mins</span>
+                </div>
+
+                <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+                    <input
+                        type="text"
+                        value={newFeedUrl}
+                        onChange={(e) => setNewFeedUrl(e.target.value)}
+                        placeholder="https://news.ycombinator.com/rss"
+                        style={{ flex: 1, background: "rgba(0,0,0,0.2)", border: "1px solid var(--border)", padding: "8px 12px", borderRadius: "6px", color: "var(--text)", fontSize: "13px" }}
+                    />
+                    <button className="btn btn-primary" onClick={handleAddFeed}>Add Feed</button>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {rssFeeds.length === 0 ? (
+                        <div style={{ fontSize: "12px", color: "var(--text-muted)", fontStyle: "italic" }}>No active RSS feeds.</div>
+                    ) : (
+                        rssFeeds.map(url => (
+                            <div key={url} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(0,0,0,0.2)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                                <span style={{ fontSize: "12px", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{url}</span>
+                                <button
+                                    onClick={() => handleRemoveFeed(url)}
+                                    style={{ background: "none", border: "none", color: "var(--danger)", cursor: "pointer", fontSize: "16px", marginLeft: "12px" }}
+                                >
+                                    &times;
+                                </button>
+                            </div>
+                        ))
+                    )}
+                </div>
+            </div>
+
+            {/* Global Ingestion Log */}
+            <div style={{ marginTop: "8px" }}>
+                <div style={{ fontSize: "13px", fontWeight: "bold", color: "var(--text)", marginBottom: "12px", paddingLeft: "4px" }}>
+                    Live Ingestion Stream
+                </div>
+                <div className="event-console" style={{ minHeight: "200px" }}>
+                    {events.length === 0 ? (
+                        <div style={{ color: "var(--text-muted)", fontSize: "12px", textAlign: "center", padding: "24px" }}>
+                            Awaiting events from RSS or Directory watcher...
                         </div>
-                    ))
-                )}
+                    ) : (
+                        events.map((e, i) => (
+                            <div key={i} className="event-row">
+                                <span className="event-time">{formatTime(e.timestamp)}</span>
+                                <span className="event-source" style={{
+                                    color: e.source === "DirectoryWatcher" ? "var(--plasma)" : "var(--ember)",
+                                    fontWeight: "bold"
+                                }}>
+                                    [{e.source}]
+                                </span>
+                                <span className="event-payload" style={{
+                                    color: e.event_type.includes("failed") ? "var(--danger)" : "var(--text)"
+                                }}>
+                                    <span style={{ opacity: 0.5, marginRight: "8px" }}>{e.event_type}</span>
+                                    {e.payload?.title || e.payload?.filename || JSON.stringify(e.payload)}
+                                </span>
+                            </div>
+                        ))
+                    )}
+                </div>
             </div>
         </div>
     );
@@ -698,7 +1078,21 @@ function TuneLabHUD() {
 }
 
 // ── Chat Panel ───────────────────────────────────────────────────
-function ChatPanel({ module, xray }: { module: string; xray: boolean; onXrayData: (g: CausalGraph | null) => void }) {
+function ChatPanel({
+    module, xray, onXrayData,
+    sessionId,
+    preloadedMessages,
+    onSessionCreated,
+    webSearchEnabled,
+}: {
+    module: string;
+    xray: boolean;
+    onXrayData: (g: CausalGraph | null) => void;
+    sessionId?: string | null;
+    preloadedMessages?: StoredMessage[] | null;
+    onSessionCreated?: (id: string) => void;
+    webSearchEnabled?: boolean;
+}) {
     // Store messages by module ID so switching tabs doesn't mix conversations
     const [messagesByModule, setMessagesByModule] = useState<Record<string, Message[]>>({
         localbuddy: [],
@@ -708,10 +1102,41 @@ function ChatPanel({ module, xray }: { module: string; xray: boolean; onXrayData
         tunelab: []
     });
 
+    // When user clicks a session from the history panel, load its messages
+    useEffect(() => {
+        if (!preloadedMessages || preloadedMessages.length === 0) return;
+        const loaded: Message[] = preloadedMessages
+            .filter(m => m.role === "user" || m.role === "assistant")
+            .map(m => ({
+                id: m.id,
+                role: m.role as "user" | "assistant",
+                content: m.content,
+                module,
+                latency_ms: (m.metadata?.latency_ms as number) || undefined,
+                faithfulness_score: (m.metadata?.faithfulness_score as number) || undefined,
+            }));
+        setMessagesByModule(prev => ({ ...prev, [module]: loaded }));
+    }, [preloadedMessages, module]);
+
+    // Compute session_id to use: prefer selected history session, fallback per-module
+    const currentSessionId = sessionId || `ui-session-${module}`;
+
     // Lifted RAG document state
     const [ragDocs, setRagDocs] = useState<RAGDoc[]>([]);
 
+    useEffect(() => {
+        fetch("/api/v1/ragforge/documents")
+            .then(r => r.json())
+            .then(data => {
+                if (data.documents) {
+                    setRagDocs(data.documents);
+                }
+            })
+            .catch(err => console.error("Failed to fetch rag docs", err));
+    }, []);
+
     const messages = messagesByModule[module] || [];
+
 
     const [input, setInput] = useState("");
     const [loading, setLoading] = useState(false);
@@ -764,13 +1189,14 @@ function ChatPanel({ module, xray }: { module: string; xray: boolean; onXrayData
 
         try {
             const activeDocs = module === "ragforge" ? ragDocs.filter(d => d.active).map(d => d.name) : [];
-            const contextPayload = activeDocs.length > 0 ? { active_docs: activeDocs } : {};
+            const contextPayload: Record<string, any> = activeDocs.length > 0 ? { active_docs: activeDocs } : {};
+            if (webSearchEnabled) contextPayload.web_search_enabled = true;
 
             const res = await fetch("/api/v1/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    session_id: `ui-session-${module}`, // Separate backend sessions per module too
+                    session_id: currentSessionId,
                     module,
                     message: text,
                     xray_mode: xray,
@@ -780,6 +1206,9 @@ function ChatPanel({ module, xray }: { module: string; xray: boolean; onXrayData
 
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+
+            // Notify parent on first message to new session so sidebar can refresh
+            if (onSessionCreated) onSessionCreated(data.session_id || currentSessionId);
 
             const blocked = data.policy_decisions?.some((p: PolicyDecision) => !p.allowed);
             const aiMsg: Message = {
@@ -921,9 +1350,12 @@ function MessageBubble({ msg }: { msg: Message }) {
             <div className={`avatar ${isUser ? "user-av" : "ai"}`}>
                 {isUser ? "You" : "Æ"}
             </div>
-            <div>
-                <div className={`bubble ${isUser ? "user-bubble" : "ai"}`}>
-                    {msg.content}
+            <div className="message-content-wrapper">
+                <div
+                    className={`bubble ${isUser ? "user-bubble" : "ai markdown-body"}`}
+                    {...(!isUser ? { dangerouslySetInnerHTML: { __html: md.render(msg.content) } } : {})}
+                >
+                    {isUser ? msg.content : null}
                 </div>
                 {!isUser && (
                     <div className="bubble-meta">
@@ -1140,6 +1572,109 @@ function PoliciesPanel() {
                         <div style={{ color: "var(--text-muted)" }}>{desc}</div>
                     </div>
                 ))}
+            </div>
+        </div>
+    );
+}
+
+// ── Multi-Node Sync Panel ────────────────────────────────────────
+
+function SyncPanel() {
+    const [syncInfo, setSyncInfo] = useState<any>(null);
+    const [manualUri, setManualUri] = useState("");
+
+    useEffect(() => {
+        fetch("/api/v1/sync/info")
+            .then(r => r.json())
+            .then(setSyncInfo)
+            .catch(console.error);
+    }, []);
+
+    const pairDevice = async () => {
+        try {
+            const res = await fetch("/api/v1/sync/pair", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ uri: manualUri })
+            });
+            if (res.ok) {
+                alert("Device Paired Successfully!");
+                setManualUri("");
+                // Refresh
+                fetch("/api/v1/sync/info").then(r => r.json()).then(setSyncInfo);
+            } else {
+                alert((await res.json()).error);
+            }
+        } catch (err) { console.error(err); }
+    };
+
+    if (!syncInfo) return <div className="panel-wrapper"><div className="panel-title">Loading Sync Engine...</div></div>;
+    if (syncInfo.status === "offline") return <div className="panel-wrapper"><div className="panel-title">Sync Engine Offline</div></div>;
+
+    return (
+        <div className="panel-wrapper" style={{ overflowY: "auto" }}>
+            <div className="panel-title">🔗 Zero-Knowledge Device Sync</div>
+            <div className="panel-sub">Peer-to-Peer AP-architecture Database Replication</div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", marginTop: "20px" }}>
+                <div className="policy-card" style={{ padding: "24px", border: "1px solid var(--border)", background: "var(--bg-elevated)", borderRadius: "var(--radius)" }}>
+                    <div style={{ fontWeight: 600, fontSize: "16px", marginBottom: "16px", color: "var(--fg)" }}>Add Device via QR Code</div>
+                    <div style={{ background: "white", padding: "16px", borderRadius: "12px", width: "fit-content", margin: "0 auto" }}>
+                        <QRCode value={syncInfo.pairing_uri} size={180} />
+                    </div>
+                    <div style={{ marginTop: "16px", fontSize: "12px", color: "var(--text-muted)", textAlign: "center" }}>
+                        Scan this with the AetherForge mobile app to establish an E2EE connection over your local LAN.
+                    </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+                    <div className="policy-card" style={{ padding: "16px", border: "1px solid var(--border)", background: "var(--bg-elevated)", borderRadius: "var(--radius)" }}>
+                        <div style={{ fontWeight: 600, marginBottom: "12px", color: "var(--fg)" }}>Manual Pair</div>
+                        <input
+                            style={{
+                                width: "100%", marginBottom: "12px", padding: "10px",
+                                background: "var(--bg)", border: "1px solid var(--border)",
+                                borderRadius: "8px", color: "var(--fg)", outline: "none"
+                            }}
+                            placeholder="Paste pairing URI..."
+                            value={manualUri}
+                            onChange={e => setManualUri(e.target.value)}
+                        />
+                        <button
+                            style={{
+                                width: "100%", padding: "10px", borderRadius: "8px",
+                                background: manualUri ? "var(--brand-glow)" : "rgba(255,255,255,0.05)",
+                                color: manualUri ? "var(--bg)" : "var(--text-muted)", border: "none",
+                                cursor: manualUri ? "pointer" : "not-allowed", fontWeight: 600
+                            }}
+                            onClick={pairDevice} disabled={!manualUri}
+                        >
+                            Connect Peer
+                        </button>
+                    </div>
+
+                    <div className="policy-card" style={{ padding: "16px", border: "1px solid var(--border)", background: "var(--bg-elevated)", borderRadius: "var(--radius)" }}>
+                        <div style={{ fontWeight: 600, marginBottom: "12px", color: "var(--fg)" }}>Cluster Status ({syncInfo.node_id})</div>
+
+                        <div style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "8px" }}>Discovered mDNS Peers:</div>
+                        {syncInfo.peers.length === 0 ? <div style={{ fontSize: "12px", background: "rgba(255,255,255,0.05)", padding: "8px", borderRadius: "8px", color: "var(--text-muted)" }}>No local peers found.</div> :
+                            syncInfo.peers.map((p: any) => (
+                                <div key={p.id} style={{ fontSize: "12px", background: "rgba(0,255,100,0.1)", color: "var(--brand-glow)", padding: "8px", borderRadius: "8px", marginBottom: "4px" }}>
+                                    ✓ {p.id} ({p.ip}:{p.port})
+                                </div>
+                            ))
+                        }
+
+                        <div style={{ fontSize: "13px", color: "var(--text-muted)", marginTop: "16px", marginBottom: "8px" }}>Authorized Devices (E2EE Active):</div>
+                        {syncInfo.authorized.length === 0 ? <div style={{ fontSize: "12px", background: "rgba(255,255,255,0.05)", padding: "8px", borderRadius: "8px", color: "var(--text-muted)" }}>Empty list. Scan the QR code.</div> :
+                            syncInfo.authorized.map((id: string) => (
+                                <div key={id} style={{ fontSize: "12px", background: "rgba(0,150,255,0.1)", color: "#a5b4fc", padding: "8px", borderRadius: "8px", marginBottom: "4px" }}>
+                                    🔐 {id}
+                                </div>
+                            ))
+                        }
+                    </div>
+                </div>
             </div>
         </div>
     );
