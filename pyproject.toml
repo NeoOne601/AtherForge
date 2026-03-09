@@ -59,8 +59,11 @@ dependencies = [
 
   # ── Observability / Telemetry ────────────────────────────────
   "langfuse>=3.0.0",        # Local Langfuse (self-hosted)
+  "structlog>=24.0.0",
   "opentelemetry-sdk>=1.25.0",
   "opentelemetry-exporter-otlp>=1.25.0",
+  "opentelemetry-instrumentation-fastapi>=0.46b0",
+  "opentelemetry-instrumentation-logging>=0.46b0",
 
   # ── Vector DB (local RAG) ────────────────────────────────────
   "chromadb>=0.5.0",        # Embedded, no server required
@@ -84,6 +87,7 @@ dependencies = [
   "matplotlib>=3.10.0",
   "seaborn>=0.13.0",
   "openpyxl>=3.1.0",         # Required for Excel support in pandas
+  "headroom-ai>=0.1.0",
 ]
 
 [project.optional-dependencies]

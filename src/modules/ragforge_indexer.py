@@ -20,7 +20,7 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import uuid
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ import gc
 import psutil
 from langchain_core.documents import Document
 
-logger = logging.getLogger("aetherforge.ragforge_indexer")
+logger = structlog.get_logger("aetherforge.ragforge_indexer")
 
 # ── Memory Governor ──────────────────────────────────────────────
 # Hard cap: never start an IN-PROCESS VLM if system memory exceeds this.

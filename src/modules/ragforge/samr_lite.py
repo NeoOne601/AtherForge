@@ -25,11 +25,11 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import math
 from typing import Any
 
-logger = logging.getLogger("aetherforge.ragforge.samr_lite")
+logger = structlog.get_logger("aetherforge.ragforge.samr_lite")
 
 # Thresholds (tuned for CognitiveRAG chain-of-thought synthesized answers)
 GROUNDED_THRESHOLD = 0.55       # answer is grounded in sources

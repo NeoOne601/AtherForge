@@ -1,5 +1,6 @@
 import asyncio
-import logging
+import structlog
+import json
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -9,7 +10,7 @@ from src.modules.sync.event_log import EventLog
 from src.modules.sync.discovery import AetherForgeDiscovery
 from src.modules.sync.crypto import SyncCrypto
 
-logger = logging.getLogger("aetherforge.sync.manager")
+logger = structlog.get_logger("aetherforge.sync.manager")
 
 class SyncManager:
     """
@@ -104,7 +105,12 @@ class SyncManager:
         
         # If we trust this peer, initiate a connection to pull their data
         if peer_node_id in self.authorized_peers:
-            asyncio.create_task(self._connect_to_peer(peer_node_id, ip, port))
+            def _handle_done(t: asyncio.Task[Any]):
+                try: t.result()
+                except Exception as e: logger.error(f"Outgoing sync task failed for {peer_node_id}: {e}")
+            
+            task = asyncio.create_task(self._connect_to_peer(peer_node_id, ip, port))
+            task.add_done_callback(_handle_done)
 
     def _on_peer_left(self, peer_node_id: str):
         """Triggered by mDNS when a peer drops off the network."""

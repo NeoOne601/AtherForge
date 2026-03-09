@@ -18,11 +18,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import collections
+import json
+import structlog
+import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal
+from typing import Any, AsyncGenerator, Literal, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -30,9 +34,8 @@ from pydantic import BaseModel
 from src.config import AetherForgeSettings
 from src.guardrails.silicon_colosseum import SiliconColosseum
 
-logger = logging.getLogger("aetherforge.meta_agent")
+logger = structlog.get_logger("aetherforge.meta_agent")
 
-# ── System Prompt ─────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
     "You are AetherForge, a local AI assistant. You run entirely on-device and "
     "never send data to the cloud. "
@@ -41,7 +44,11 @@ _SYSTEM_PROMPT = (
     "Prefer numbered lists or sections for non-trivial problems, and call out any "
     "assumptions you make. "
     "Be concise, accurate, and transparent about uncertainty while aiming for the "
-    "same depth and thoroughness as a state-of-the-art assistant like ChatGPT."
+    "same depth and thoroughness as a state-of-the-art assistant like ChatGPT.\n\n"
+    "TOOL CALLING RULES (CRITICAL):\n"
+    "1. You MUST call a tool if the user's request requires live data (weather, news, system stats).\n"
+    "2. Output the tool call in a ```json block BEFORE any other text.\n"
+    "3. Do NOT invent data if a tool can provide it."
 )
 
 
@@ -62,6 +69,34 @@ def _messages_to_prompt(messages: list[Any]) -> str:
     # Add trailing prompt initiator
     parts.append("<|im_start|>assistant\n")
     return "\n".join(parts)
+
+
+def _lc_messages_to_dicts(messages: list[Any]) -> list[dict[str, Any]]:
+    """Convert LangChain messages to standard dict format."""
+    dicts = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            dicts.append({"role": "system", "content": msg.content})
+        elif isinstance(msg, HumanMessage):
+            dicts.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            dicts.append({"role": "assistant", "content": msg.content})
+    return dicts
+
+
+def _dicts_to_lc_messages(dicts: list[dict[str, Any]]) -> list[Any]:
+    """Convert standard dict format back to LangChain messages."""
+    messages = []
+    for d in dicts:
+        role = d.get("role")
+        content = d.get("content")
+        if role == "system":
+            messages.append(SystemMessage(content=content))
+        elif role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+    return messages
 
 
 # ── Mock LLM for development (when model file absent) ─────────────
@@ -89,7 +124,36 @@ class MetaAgentInput(BaseModel):
     message: str
     xray_mode: bool = False
     context: dict[str, Any] = {}
+    system_location: Optional[str] = None
 
+
+# ── IRA Framework Data Models ─────────────────────────────────────
+
+class BlueprintTask(BaseModel):
+    """A single sub-task within an IRA Blueprint."""
+    id: str
+    description: str
+    module: str
+    tool_call: Optional[dict[str, Any]] = None
+    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    result: Optional[str] = None
+    reflection: Optional[str] = None
+
+class IRABlueprint(BaseModel):
+    """The recursive plan generated before execution."""
+    goal: str
+    tasks: list[BlueprintTask] = []
+    metadata: dict[str, Any] = {}
+
+class IRAState(BaseModel):
+    """Memory state for the recursive agentic loop."""
+    session_id: str
+    blueprint: Optional[IRABlueprint] = None
+    current_task_idx: int = 0
+    internal_history: list[dict[str, Any]] = []
+    recursion_depth: int = 0
+    max_recursion: int = 5
+    is_complete: bool = False
 
 class MetaAgentOutput(BaseModel):
     """Typed output from a single meta-agent turn."""
@@ -98,6 +162,7 @@ class MetaAgentOutput(BaseModel):
     policy_decisions: list[dict[str, Any]] = []
     causal_graph: dict[str, Any] | None = None
     faithfulness_score: float | None = None
+    blueprint: Optional[IRABlueprint] = None
 
 
 # ── MetaAgent ─────────────────────────────────────────────────────
@@ -123,14 +188,73 @@ class MetaAgent:
         self.vector_store = vector_store
         self.replay_buffer = replay_buffer
         self._llm: Any = None
-        self._lock = asyncio.Lock()
-        self._session_memories: dict[str, list[Any]] = {}
+        self._lock = threading.Lock()
+        self._session_memories: collections.OrderedDict[str, list[Any]] = collections.OrderedDict()
         self._sparse_index: Any = None  # FTS5 sparse index (lazy init)
+        self.loop = asyncio.get_event_loop()
+
+        # ── Headroom Context Optimization ─────────────────────
+        try:
+            from headroom.tokenizer import Tokenizer
+            from headroom.providers.openai_compatible import OpenAICompatibleTokenCounter
+            from headroom.transforms.intelligent_context import IntelligentContextManager
+            from headroom.config import IntelligentContextConfig
+
+            # Using llama-3 tokenizer backend as a good approximation for BitNet/Llama-based GGUFs
+            self.token_counter = OpenAICompatibleTokenCounter(model="llama3.1")
+            self.headroom_tokenizer = Tokenizer(self.token_counter)
+            self.headroom_config = IntelligentContextConfig(
+                enabled=True,
+                keep_last_turns=3,
+                keep_system=True,
+            )
+            self.context_manager = IntelligentContextManager(config=self.headroom_config)
+            logger.info("Headroom context optimization layer initialized")
+        except ImportError:
+            logger.warning("headroom-ai not installed; falling back to legacy pruning")
+            self.context_manager = None
 
     async def initialize(self) -> None:
         """Load BitNet model in a thread executor (non-blocking)."""
         await self._load_model()
         logger.info("MetaAgent initialized")
+
+    async def refine_text(self, text: str) -> str:
+        """
+        Refine the user's input text for grammar, spelling, and clarity.
+        Uses a specialized prompt and low temperature for zero-shot correction.
+        """
+        if not text.strip():
+            return text
+            
+        system_prompt = (
+            "You are a professional grammar and spelling correction tool. "
+            "Refine the user's text for clarity, grammar, and spelling. "
+            "Keep the original meaning and tone. "
+            "Output ONLY the corrected text. Do NOT include any explanations, "
+            "quotes, or prefixes like 'Refined:' or 'Corrected:'."
+        )
+        
+        from langchain_core.messages import SystemMessage, HumanMessage
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=text)
+        ]
+        
+        # Run synchronous LLM call in a thread pool to avoid blocking the event loop
+        loop = self.loop
+        def _run():
+            return self._run_llm_sync(messages, max_tokens=256, temperature=0.1)
+            
+        refined = await loop.run_in_executor(None, _run)
+        
+        # Post-processing: remove any residual quotes or labels if the model leaked them
+        if refined.startswith('"') and refined.endswith('"'):
+            refined = refined[1:-1]
+        if ":" in refined[:20] and any(lbl in refined[:20].lower() for lbl in ["corrected", "refined", "output"]):
+            refined = refined.split(":", 1)[1].strip()
+            
+        return refined.strip()
 
     async def _load_model(self) -> None:
         """
@@ -157,7 +281,7 @@ class MetaAgent:
                 verbose=False,
             )
 
-        loop = asyncio.get_event_loop()
+        loop = self.loop
         self._llm = await loop.run_in_executor(None, _load)
         logger.info("BitNet model loaded")
 
@@ -209,7 +333,7 @@ class MetaAgent:
                         filename=filename,
                         local_dir=str(self.settings.bitnet_model_path.parent)
                     )
-                loop = asyncio.get_event_loop()
+                loop = self.loop
                 await loop.run_in_executor(None, _download)
 
             logger.info("Binding new model path: %s", target_path)
@@ -222,30 +346,70 @@ class MetaAgent:
         if isinstance(self._llm, MockLLM):
             return self._llm.generate(messages)
 
-        # ── Context Window Pruning ────────────────────────────
-        # 4096 tokens * ~3.5 chars/token = 14,336 chars.
-        # We prune if the prompt exceeds 12,000 chars to stay safe.
-        pruned_messages = list(messages)
-        while len(_messages_to_prompt(pruned_messages)) > 12000 and len(pruned_messages) > 3:
-            # Keep index 0 (System Message), remove oldest User/Assistant pair
-            logger.info("Context window pressure: pruning oldest message pair")
-            pruned_messages.pop(1)
-            pruned_messages.pop(1)
+        # ── Intelligent Context Pruning (Headroom Integration) ─
+        if self.context_manager:
+            msg_dicts = _lc_messages_to_dicts(messages)
+            # available = n_ctx - max_tokens - safety_buffer
+            result = self.context_manager.apply(
+                messages=msg_dicts,
+                tokenizer=self.headroom_tokenizer,
+                model_limit=self.settings.bitnet_n_ctx,
+                output_buffer=self.settings.bitnet_max_tokens + 100, # with safety margin
+            )
+            pruned_messages = _dicts_to_lc_messages(result.messages)
+            if result.transforms_applied:
+                tokens_saved = result.tokens_before - result.tokens_after
+                logger.info("Headroom optimized context: %d tokens saved via %d transforms", 
+                            tokens_saved, len(result.transforms_applied))
+        else:
+            # Legacy fallback
+            pruned_messages = list(messages)
+            while len(_messages_to_prompt(pruned_messages)) > 12000 and len(pruned_messages) > 3:
+                pruned_messages.pop(1)
+                pruned_messages.pop(1)
 
         prompt = _messages_to_prompt(pruned_messages)
-        result = self._llm(
+        return self._call_llm_with_retry(
             prompt,
             max_tokens=max_tokens or self.settings.bitnet_max_tokens,
             temperature=temperature if temperature is not None else self.settings.bitnet_temperature,
             top_p=self.settings.bitnet_top_p,
             stop=["<|im_end|>"],
         )
-        return result["choices"][0]["text"].strip()
+
+    def _call_llm_with_retry(self, prompt: str, **kwargs: Any) -> str:
+        """Calls the LLM with exponential backoff for transient failures."""
+        max_retries = 3
+        delay = 1.0
+        last_err = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Thread-safe LLM access (serialize actual inference but not pipeline)
+                with self._lock:
+                    result = self._llm(prompt, **kwargs)
+                return str(result["choices"][0]["text"]).strip()
+            except Exception as e:
+                last_err = e
+                logger.warning(f"LLM inference attempt {attempt+1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    
+        logger.error(f"LLM inference exhausted {max_retries} attempts. Final error: {last_err}")
+        return f"⚠️ LLM Error: I encountered a transient failure processing this request after {max_retries} attempts."
 
     def _get_or_create_memory(self, session_id: str) -> list[Any]:
-        """Return the message history for a session, creating it if needed."""
-        if session_id not in self._session_memories:
+        """Return the message history for a session, creating it if needed with LRU eviction."""
+        if session_id in self._session_memories:
+            # Move to end (MRU)
+            self._session_memories.move_to_end(session_id)
+        else:
+            # Create new entry
             self._session_memories[session_id] = [SystemMessage(content=_SYSTEM_PROMPT)]
+            # Check for eviction (default cap 100 sessions)
+            if len(self._session_memories) > self.settings.max_session_memories:
+                self._session_memories.popitem(last=False)
         return self._session_memories[session_id]
 
     def _hybrid_search(
@@ -331,6 +495,46 @@ class MetaAgent:
                 filter_kwargs["filter"] = {"source": {"$in": source_filter}}
         return self.vector_store.similarity_search(query, k=k, **filter_kwargs)
 
+    def _generate_ira_blueprint(self, message: str, context: dict[str, Any]) -> IRABlueprint:
+        """
+        Generate a multi-step plan (blueprint) for the given request.
+        Uses a dry-run prompt to decompose the goal into atomic tasks.
+        """
+        system_prompt = (
+            "You are the IRA Planning Engine. Your job is to break a complex user request "
+            "into 2-4 atomic, sequential tasks for an agentic loop.\n\n"
+            "Each task must have:\n"
+            "1. id: unique short string\n"
+            "2. description: what to do\n"
+            "3. module: one of [ragforge, localbuddy, watchtower, streamsync, tunelab]\n\n"
+            "Output the plan as a JSON block in this format:\n"
+            "```json\n"
+            "{\"goal\": \"Overall user goal\", \"tasks\": [{\"id\": \"t1\", \"description\": \"...\", \"module\": \"...\"}]}\n"
+            "```"
+        )
+        
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"User Request: {message}\nContext: {context}")
+        ]
+        
+        try:
+            raw_plan = self._run_llm_sync(messages, max_tokens=500, temperature=0.1)
+            import json
+            import re
+            json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', raw_plan, re.DOTALL)
+            if json_match:
+                plan_data = json.loads(json_match.group(1))
+                return IRABlueprint(**plan_data)
+        except Exception as e:
+            logger.warning("IRA Blueprint generation failed: %s", e)
+            
+        # Fallback: single-task blueprint
+        return IRABlueprint(
+            goal=message,
+            tasks=[BlueprintTask(id="task_1", description=message, module="localbuddy")]
+        )
+
     def _get_cognitive_rag(self) -> "CognitiveRAG":
         """Lazily create a CognitiveRAG instance that reuses the loaded BitNet + search."""
         if not hasattr(self, "_cognitive_rag_instance") or self._cognitive_rag_instance is None:
@@ -342,15 +546,25 @@ class MetaAgent:
             logger.info("CognitiveRAG pipeline initialized (reusing BitNet + hybrid search)")
         return self._cognitive_rag_instance
 
+    def _get_aether_researcher(self) -> "AetherResearcher":
+        """Lazily create an AetherResearcher instance."""
+        if not hasattr(self, "_researcher_instance") or self._researcher_instance is None:
+            from src.learning.evolution import AetherResearcher, ExperimentManager
+            manager = ExperimentManager(self.settings)
+            self._researcher_instance = AetherResearcher(manager)
+            logger.info("AetherResearcher specialized IRA agent initialized")
+        return self._researcher_instance
+
     async def run(self, inp: MetaAgentInput) -> MetaAgentOutput:
         """
         Execute one full agent turn.
-        Serialized by asyncio.Lock to prevent llama-cpp concurrency issues.
+        Concurrency: The model inference is internally serialized by threading.Lock
+        to prevent llama-cpp-python race conditions, but RAG and tool lookups
+        are now non-blocking.
         """
-        async with self._lock:
-            return await asyncio.get_event_loop().run_in_executor(
-                None, self._run_sync, inp
-            )
+        return await self.loop.run_in_executor(
+            None, self._run_sync, inp
+        )
 
     def _run_sync(self, inp: MetaAgentInput) -> MetaAgentOutput:
         """
@@ -365,6 +579,10 @@ class MetaAgent:
         policy_decisions: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         t_total = time.perf_counter()
+        ragforge_trace = None
+        retrieved_doc_texts: list[str] = []
+        messages_with_context: list[Any] = []
+        tool_executed_successfully = False
 
         def _trace(node: str, data: dict[str, Any]) -> None:
             if inp.xray_mode:
@@ -395,113 +613,27 @@ class MetaAgent:
         memory.append(HumanMessage(content=inp.message))
         _trace("intake", {"session_id": inp.session_id, "module": inp.module, "message_len": len(inp.message)})
 
-        # ── 3. Module dispatch ────────────────────────────────────
-        t0 = time.perf_counter()
+        # ── 3. Module & Tool Context Initialization ──────────────
         VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
-        module = inp.module if inp.module in VALID_MODULES else "localbuddy"
-        _trace("router", {"selected_module": module})
-
-        # Build module-specific system context
-        module_context = _MODULE_CONTEXTS.get(module, "")
+        main_module = inp.module if inp.module in VALID_MODULES else "localbuddy"
+        module_context = _MODULE_CONTEXTS.get(main_module, "")
+        web_search_enabled = inp.context.get("web_search_enabled", False)
         
-        # Default for non-ragforge modules (SAMR-lite uses this later)
-        retrieved_doc_texts: list[str] = []
-
-        # Inject RAG Context if applicable
-        if module == "ragforge" and self.vector_store:
-            t_rag = time.perf_counter()
-            active_docs = inp.context.get("active_docs", [])
-            source_filter: str | list[str] | None = None
-            if active_docs:
-                source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
-
-            # ── CognitiveRAG: 7-Stage Thinking Pipeline ──────────
-            cognitive = self._get_cognitive_rag()
-            answer, evidence_docs, thinking_trace = cognitive.think_and_answer(
-                query=inp.message,
-                source_filter=source_filter,
-            )
-            retrieved_doc_texts = [d.page_content for d in evidence_docs]
-
-            if evidence_docs:
-                # DIRECT PASSTHROUGH: CognitiveRAG already produced a
-                # chain-of-thought, evidence-scored, self-verified answer.
-                # We skip the second LLM call and use this answer directly.
-                _cograg_direct_answer = answer
-                _trace("rag_retrieval", {
-                    "chunks": len(evidence_docs),
-                    "query_type": thinking_trace.query_type,
-                    "verified": thinking_trace.verification_passed,
-                    "rounds": thinking_trace.retrieval_rounds,
-                    "latency_ms": (time.perf_counter() - t_rag) * 1000,
-                })
-            else:
-                _cograg_direct_answer = None
-                module_context += "\n\nRetrieved Context: No relevant documents found. Ask the user to upload documents first."
-                retrieved_doc_texts = []
-                _trace("rag_retrieval", {"chunks": 0, "latency_ms": (time.perf_counter() - t_rag) * 1000})
-
-        # Inject Intent Engine Tools if applicable
-        # Inject Intent Engine Tools if applicable
         tool_module = None
         tools_list = []
         few_shot = ""
-        
-        if module in {"watchtower", "streamsync", "tunelab"}:
+
+        # Load Intent Tools if applicable
+        if main_module in {"watchtower", "streamsync", "tunelab"}:
             try:
                 import importlib
-                tool_module = importlib.import_module(f"src.modules.{module}.tools")
+                tool_module = importlib.import_module(f"src.modules.{main_module}.tools")
                 if hasattr(tool_module, "get_tools"):
                     tools_list.extend(tool_module.get_tools())
-                    _FEW_SHOT_DICT = {
-                        "watchtower": (
-                            "User: why is memory usage so high?\n"
-                            "Assistant: Let me pull the live memory stats now.\n"
-                            "```json\n{\"tool_name\": \"query_metrics\", \"arguments\": {\"metric_name\": \"mem\"}}\n```\n"
-                            "User: what process is using all my memory?\n"
-                            "Assistant: Checking top memory consumers right now.\n"
-                            "```json\n{\"tool_name\": \"get_top_processes\", \"arguments\": {\"sort_by\": \"memory\"}}\n```\n"
-                            "User: kill python_worker\n"
-                            "Assistant: Terminating python_worker now.\n"
-                            "```json\n{\"tool_name\": \"kill_process\", \"arguments\": {\"target\": \"python_worker\"}}\n```"
-                        ),
-                        "streamsync": (
-                            "User: show me the event stream\n"
-                            "Assistant: Fetching the latest events from the buffer.\n"
-                            "```json\n{\"tool_name\": \"query_stream\", \"arguments\": {\"limit\": 10}}\n```\n"
-                            "User: what patterns are in the stream?\n"
-                            "Assistant: Summarizing the stream data now.\n"
-                            "```json\n{\"tool_name\": \"summarize_stream\", \"arguments\": {}}\n```\n"
-                            "User: how can I analyze the event streams here?\n"
-                            "Assistant: Let me pull the current events so you can see exactly what's flowing in.\n"
-                            "```json\n{\"tool_name\": \"query_stream\", \"arguments\": {\"limit\": 20}}\n```"
-                        ),
-                        "tunelab": (
-                            "User: how many are ready for training?\n"
-                            "Assistant: Querying the Replay Buffer stats now.\n"
-                            "```json\n{\"tool_name\": \"query_buffer_stats\", \"arguments\": {}}\n```\n"
-                            "User: how many samples are pending?\n"
-                            "Assistant: Let me check the buffer right now.\n"
-                            "```json\n{\"tool_name\": \"query_buffer_stats\", \"arguments\": {}}\n```\n"
-                            "User: trigger the compilation\n"
-                            "Assistant: Starting the OPLoRA compilation cycle now.\n"
-                            "```json\n{\"tool_name\": \"trigger_compilation\", \"arguments\": {}}\n```"
-                        ),
-                        "analytics": (
-                            "User: summarize sales.xlsx\n"
-                            "Assistant: Analyzing the data in sales.xlsx now.\n"
-                            "```json\n{\"tool_name\": \"analyze_data\", \"arguments\": {\"source\": \"sales.xlsx\", \"operation\": \"summary\"}}\n```\n"
-                            "User: show me a bar chart of the sales by region\n"
-                            "Assistant: Generating a region-based sales chart for you.\n"
-                            "```json\n{\"tool_name\": \"create_visual\", \"arguments\": {\"chart_type\": \"bar\", \"title\": \"Sales by Region\", \"labels\": [\"North\", \"South\", \"East\", \"West\"], \"values\": [1500, 2300, 1800, 2100]}}\n```"
-                        ),
-                    }
-                    few_shot += _FEW_SHOT_DICT.get(module, "")
             except Exception as e:
-                logger.error("Failed to load Intent Tools for %s: %s", module, e)
+                logger.error("Failed to load Intent Tools for %s: %s", main_module, e)
 
-        # Inject Web Search if enabled
-        web_search_enabled = inp.context.get("web_search_enabled", False)
+        # Inject Web Search & Weather tools if enabled
         if web_search_enabled:
             tools_list.append({
                 "name": "search_web",
@@ -514,40 +646,112 @@ class MetaAgent:
                     "required": ["query"]
                 }
             })
-            if few_shot: few_shot += "\n"
-            few_shot += (
-                "User: what is the weather in Tokyo right now?\n"
-                "Assistant: Let me check the live weather online.\n"
-                "```json\n{\"tool_name\": \"search_web\", \"arguments\": {\"query\": \"current weather in Tokyo\"}}\n```"
-            )
+            # ... (adding weather tool)
+            tools_list.append({
+                "name": "get_weather",
+                "description": "Gets the current weather for a specific city or location using SI units (°C, km/h).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and country or a well-known place name."}
+                    },
+                    "required": ["location"]
+                }
+            })
 
+        # Pre-process module context with tools
         if tools_list:
             import json
             tools_def = json.dumps(tools_list, indent=2)
-            module_context += (
-                f"\n\nAVAILABLE TOOLS:\nYou have access to the following tools to act upon the system:\n"
-                f"{tools_def}\n\n"
-                "CRITICAL INSTRUCTION: You MUST call a tool when the user's request can be answered by one. "
-                "Do NOT explain what the tool does. Do NOT guide the user through the UI. "
-                "Call the tool first, then explain the result in plain language. "
-                "Output the tool call wrapped in a ```json block in this exact format:\n"
-                "```json\n{\"tool_name\": \"name_of_tool\", \"arguments\": {\"arg1\": \"val1\"}}\n```\n\n"
-                f"MODULE-SPECIFIC EXAMPLES:\n{few_shot}"
+            module_context += f"\n\nAVAILABLE TOOLS:\n{tools_def}\n\nCall tools using ```json block."
+
+        # ── 4. IRA Core: Planning & Recursive Loop ──────────────────
+        blueprint = self._generate_ira_blueprint(inp.message, inp.context)
+        ira_state = IRAState(session_id=inp.session_id, blueprint=blueprint)
+        _trace("planning", {"goal": blueprint.goal, "tasks": len(blueprint.tasks)})
+
+        final_task_results: list[str] = []
+        
+        # Execute each task in the blueprint
+        while ira_state.current_task_idx < len(blueprint.tasks) and ira_state.recursion_depth < ira_state.max_recursion:
+            task = blueprint.tasks[ira_state.current_task_idx]
+            task.status = "running"
+            _trace(f"executing_{task.id}", {"description": task.description, "module": task.module})
+            
+            # Sub-task module context
+            sub_module = task.module if task.module in VALID_MODULES else "localbuddy"
+            sub_module_context = _MODULE_CONTEXTS.get(sub_module, "")
+            
+            t_task = time.perf_counter()
+            task_context = (
+                f"\n\nCURRENT TASK: {task.description}\n"
+                f"Previous Findings: {ira_state.internal_history}\n"
+                "Focus ONLY on completing this specific sub-task."
             )
 
-        messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
+            # Execution
+            if "optimize" in task.description.lower() or "evolution" in task.description.lower():
+                researcher = self._get_aether_researcher()
+                # Determine benchmark type based on description
+                b_type = "rag"
+                if "tune" in task.description.lower() or "learning" in task.description.lower():
+                    b_type = "learning"
+                
+                # Setup benchmark function
+                if b_type == "rag":
+                    from src.modules.ragforge.benchmarker import RAGBenchmarker
+                    from src.modules.ragforge.history_manager import RAGHistoryManager
+                    rm = RAGHistoryManager(self.settings)
+                    bench = RAGBenchmarker(self._get_cognitive_rag(), rm)
+                    b_fn = bench.run_suite
+                else:
+                    from src.learning.benchmarker import BitNetBenchmarker
+                    from src.learning.bitnet_trainer import BitNetTrainer
+                    trainer = BitNetTrainer(self.settings, self.replay_buffer)
+                    bench = BitNetBenchmarker(trainer)
+                    b_fn = bench.run_sprint
+                
+                # Note: run_evolution_cycle is async
+                # Since we are in _run_sync (run_in_executor), we need to run it in the existing loop
+                record = asyncio.run_coroutine_threadsafe(researcher.run_evolution_cycle(b_fn), self.loop).result()
+                task_res = (
+                    f"Autonomous Evolution Cycle Complete.\n"
+                    f"Experiment: {record.experiment_id}\n"
+                    f"Mutation: {record.mutation_target} ({record.initial_value} -> {record.new_value})\n"
+                    f"Metric: {record.baseline_metric:.4f} -> {record.new_metric:.4f}\n"
+                    f"Decision: **{record.status.upper()}**"
+                )
+            elif sub_module in ["ragforge", "analytics"] and self.vector_store:
+                active_docs = inp.context.get("active_docs", [])
+                source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
+                cognitive = self._get_cognitive_rag()
+                answer, _, _ = cognitive.think_and_answer(query=task.description, source_filter=source_filter)
+                task_res = answer
+            else:
+                messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + sub_module_context + task_context)] + memory[1:]
+                task_res = self._run_llm_sync(messages)
 
-        # Run LLM — but skip if CognitiveRAG already produced a verified answer
-        if module == "ragforge" and '_cograg_direct_answer' in dir() and _cograg_direct_answer:
-            # DIRECT PASSTHROUGH: CognitiveRAG's chain-of-thought answer is
-            # already evidence-scored and self-verified. No second LLM call needed.
-            response_text = _cograg_direct_answer
-            logger.info("CognitiveRAG direct passthrough — skipping redundant LLM call")
-        else:
-            # Force temperature to 0.0 when tools are present to ensure strict JSON adherence
-            llm_temp = 0.0 if tool_module else self.settings.bitnet_temperature
-            response_text = self._run_llm_sync(messages_with_context, temperature=llm_temp)
-        _trace(f"module_{module}", {"latency_ms": (time.perf_counter() - t0) * 1000, "response_preview": response_text[:100]})
+            task.result = task_res
+            task.status = "completed"
+            ira_state.internal_history.append({"task_id": task.id, "result": task_res})
+            final_task_results.append(f"### Research: {task.description}\n{task_res}")
+            
+            _trace(f"finished_{task.id}", {"latency_ms": (time.perf_counter() - t_task) * 1000})
+            ira_state.current_task_idx += 1
+            ira_state.recursion_depth += 1
+
+        # ── 5. Final Synthesis ────────────────────────────────────
+        synthesis_prompt = (
+            "Synthesize the findings from your internal research tasks into a final, cohesive answer. "
+            "If a tool call is needed based on these findings, output it in the ```json block.\n\n"
+            f"User Goal: {inp.message}\n"
+            f"Findings:\n" + "\n\n".join(final_task_results)
+        )
+        
+        messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context), HumanMessage(content=synthesis_prompt)]
+        response_text = self._run_llm_sync(messages)
+        _trace("synthesis", {"response_len": len(response_text)})
+        _trace(f"module_{main_module}", {"latency_ms": (time.perf_counter() - t0) * 1000, "response_preview": response_text[:100]})
 
         # Tool Execution Loop
         tool_executed_successfully = False
@@ -558,9 +762,9 @@ class MetaAgent:
         logger.debug("---")
 
         # Look for markdown JSON blocks, or just the first JSON-like dictionary it outputs
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', response_text, re.DOTALL)
         if not json_match:
-            json_match = re.search(r'(\{.*?\"(?:tool_name|name)\".*?\})', response_text, re.DOTALL)
+            json_match = re.search(r'(\{.*\"(?:tool_name|name)\".*\})', response_text, re.DOTALL)
             
         if json_match:
             try:
@@ -583,14 +787,78 @@ class MetaAgent:
                 # Execute tool
                 tool_output: str | None = None
                 
-                if tool_name == "search_web" and web_search_enabled:
-                    from duckduckgo_search import DDGS
+                if not tool_name:
+                    logger.debug("JSON block found but no tool_name or name field present. Skipping tool execution.")
+                elif tool_name == "search_web" and web_search_enabled:
                     try:
-                        results = DDGS().text(tool_args.get("query", ""), max_results=3)
-                        chunks = [f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}" for r in results]
-                        tool_output = "\n\n".join(chunks) if chunks else "No results found on the internet."
+                        from ddgs import DDGS
+                        with DDGS() as ddgs:
+                            query = tool_args.get("query", "")
+                            if inp.system_location and len(query.split()) < 3 and "in" not in query.lower():
+                                query = f"{query} in {inp.system_location}"
+                            logger.info("Executing Web Search: %s", query)
+                            results = list(ddgs.text(query, max_results=5))
+                        if not results:
+                            tool_output = "No results found on the internet for this query."
+                        else:
+                            chunks = [f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}" for r in results]
+                            tool_output = "\n\n".join(chunks)
                     except Exception as e:
                         tool_output = f"Web search failed: {e}"
+                        logger.error(tool_output)
+
+                elif tool_name == "get_weather" and web_search_enabled:
+                    # Live weather via Open-Meteo (no API key, SI units by default).
+                    try:
+                        import httpx
+                        location = (tool_args.get("location") or "").strip()
+                        if not location and getattr(inp, "system_location", None):
+                            location = inp.system_location
+                        if not location:
+                            tool_output = "Weather lookup failed: no location provided."
+                        else:
+                            with httpx.Client(timeout=5.0) as client:
+                                geo_resp = client.get(
+                                    "https://geocoding-api.open-meteo.com/v1/search",
+                                    params={"name": location, "count": 1, "language": "en", "format": "json"},
+                                )
+                                geo = geo_resp.json()
+                                results = geo.get("results") or []
+                                if not results:
+                                    tool_output = f"Weather lookup failed: could not resolve location '{location}'."
+                                else:
+                                    place = results[0]
+                                    lat = place.get("latitude")
+                                    lon = place.get("longitude")
+                                    resolved_name = f"{place.get('name', '')}, {place.get('country', '')}".strip(", ")
+                                    wx_resp = client.get(
+                                        "https://api.open-meteo.com/v1/forecast",
+                                        params={
+                                            "latitude": lat,
+                                            "longitude": lon,
+                                            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+                                            "temperature_unit": "celsius",
+                                            "wind_speed_unit": "kmh",
+                                            "timezone": "auto",
+                                        },
+                                    )
+                                    wx = wx_resp.json()
+                                    current = wx.get("current") or {}
+                                    t = current.get("temperature_2m")
+                                    feels = current.get("apparent_temperature")
+                                    rh = current.get("relative_humidity_2m")
+                                    rain = current.get("precipitation")
+                                    wind = current.get("wind_speed_10m")
+                                    tool_output = (
+                                        f"Resolved location: {resolved_name} (lat {lat}, lon {lon})\n"
+                                        f"Temperature: {t} °C (feels like {feels} °C)\n"
+                                        f"Relative humidity: {rh}%\n"
+                                        f"Precipitation: {rain} mm\n"
+                                        f"Wind speed: {wind} km/h\n"
+                                        "All values are in SI units (°C, km/h, mm)."
+                                    )
+                    except Exception as e:
+                        tool_output = f"Weather lookup failed: {e}"
                         logger.error(tool_output)
                         
                 elif tool_module and hasattr(tool_module, "execute_tool"):
@@ -608,7 +876,12 @@ class MetaAgent:
                 if tool_output is not None:
                     tool_calls.append({"name": tool_name, "arguments": tool_args, "result": tool_output})
                     
-                    # Add tool execution result back into conversation
+                    # Update internal history for IRA
+                    causal_nodes.append({"id": f"tool_{tool_name}", "data": {"args": tool_args, "result": tool_output[:100]}, "ts": time.perf_counter()})
+                    
+                    if not messages_with_context:
+                        messages_with_context = list(memory)
+                        
                     messages_with_context.append(AIMessage(content=response_text))
                     messages_with_context.append(SystemMessage(content=(
                         f"Tool '{tool_name}' executed successfully and returned the following live data:\n{tool_output}\n\n"
@@ -629,19 +902,22 @@ class MetaAgent:
 
         # ── 4. Optional Deep Reasoning Reflection Pass ─────────────
         deep_reasoning_enabled = bool(inp.context.get("deep_reasoning", False))
-        if deep_reasoning_enabled and not isinstance(self._llm, MockLLM):
+        if deep_reasoning_enabled and not isinstance(self._llm, MockLLM) and not tool_executed_successfully:
             # Run a second, internal reflection pass to improve the draft answer.
-            # This pass never calls tools again; it only refines the explanation and reasoning.
+            # To keep latency manageable on 8GB machines, we restrict the reflection
+            # context to just: system + current user message + draft answer.
             reflection_system = SystemMessage(
                 content=(
-                    "You have already produced the draft answer above. "
+                    "You have already produced the draft answer below. "
                     "Now carefully reflect on it: check the logic, fill in any missing steps, "
                     "correct mistakes, and improve clarity and structure. "
                     "Do NOT mention that you are revising your answer or that this is a second pass — "
                     "just respond with the improved final answer."
                 )
             )
-            reflection_messages = messages_with_context + [
+            reflection_messages = [
+                SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context),
+                HumanMessage(content=inp.message),
                 AIMessage(content=response_text),
                 reflection_system,
             ]
@@ -660,7 +936,7 @@ class MetaAgent:
         # For pure LLM responses to other modules, use the heuristic estimator.
         if tool_executed_successfully:
             faithfulness_score = 0.95  # Tool-backed responses are always grounded
-        elif module == "ragforge" and retrieved_doc_texts and response_text:
+        elif main_module == "ragforge" and retrieved_doc_texts and response_text:
             # SAMR-lite: semantic faithfulness check for RAG answers
             try:
                 from src.modules.ragforge.samr_lite import run_samr_lite
@@ -671,6 +947,17 @@ class MetaAgent:
                 )
                 faithfulness_score = samr_result.get("faithfulness_score", 0.5)
                 _trace("samr_lite", samr_result)
+                
+                # Prepend the reasoning trace if available (ONLY for ragforge)
+                if ragforge_trace and ragforge_trace.reasoning_chain:
+                    formatted_cot = (
+                        "<details>\n"
+                        "<summary>🧠 <b>CognitiveRAG Thinking Process</b></summary>\n\n"
+                        f"{ragforge_trace.reasoning_chain}\n\n"
+                        "</details>\n\n"
+                    )
+                    response_text = formatted_cot + response_text
+
                 # Append SAMR badge to answer when low confidence
                 if samr_result.get("alert_triggered"):
                     icon = samr_result.get("alert_icon", "⚠️")
@@ -689,7 +976,7 @@ class MetaAgent:
         # any value from their uploaded documents — the opposite of our goal.
         # Colosseum blocking is reserved for tool-calling modules (WatchTower, etc.)
         # where a bad faithfulness score means the AI made up a tool result.
-        ragforge_samr_active = (module == "ragforge" and retrieved_doc_texts)
+        ragforge_samr_active = (main_module == "ragforge" and retrieved_doc_texts)
         if faithfulness_score < self.settings.silicon_colosseum_min_faithfulness and not ragforge_samr_active:
             post_decision = self.colosseum.evaluate_request_sync({
                 "session_id": inp.session_id,
@@ -715,15 +1002,16 @@ class MetaAgent:
         if tool_executed_successfully and faithfulness_score >= self.settings.silicon_colosseum_min_faithfulness and self.replay_buffer:
             try:
                 # Add to Replay Buffer for continual learning (OPLoRA)
-                asyncio.get_event_loop().create_task(
+                asyncio.run_coroutine_threadsafe(
                     self.replay_buffer.record(
                         session_id=inp.session_id,
-                        module=module,
+                        module=main_module,
                         prompt=inp.message,
                         response=response_text,
                         tool_calls=tool_calls,
                         faithfulness_score=faithfulness_score
-                    )
+                    ),
+                    self.loop
                 )
                 _trace("replay_buffer_append", {"status": "success", "tool_calls": len(tool_calls)})
             except Exception as e:
@@ -743,15 +1031,17 @@ class MetaAgent:
             policy_decisions=policy_decisions,
             causal_graph=causal_graph,
             faithfulness_score=faithfulness_score,
+            blueprint=blueprint,
         )
 
     async def stream(self, inp: MetaAgentInput) -> AsyncGenerator[dict[str, Any], None]:
         """
         Async generator that yields token-by-token chunks for WebSocket streaming.
-        Falls back to single-chunk yield for MockLLM.
+        Incorporates IRA recursive logic: Planning -> Task Execution (with thinking tokens) -> Synthesis.
         """
         async with self._lock:
             if isinstance(self._llm, MockLLM):
+                # ... (MockLLM logic)
                 memory = self._get_or_create_memory(inp.session_id)
                 memory.append(HumanMessage(content=inp.message))
                 text = self._llm.generate(memory)
@@ -759,64 +1049,110 @@ class MetaAgent:
                 yield {"type": "token", "content": text}
                 return
 
-            # Real streaming via llama-cpp create_completion with stream=True
             memory = self._get_or_create_memory(inp.session_id)
             memory.append(HumanMessage(content=inp.message))
             
-            # Module dispatch and RAG Context
+            # ── 1. Module & Tool Context Initialization ──────────────
             VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
-            module = inp.module if inp.module in VALID_MODULES else "localbuddy"
-            module_context = _MODULE_CONTEXTS.get(module, "")
-
-            if module == "ragforge" and self.vector_store:
-                active_docs = inp.context.get("active_docs", [])
-                source_filter: str | list[str] | None = None
-                if active_docs:
-                    source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
-
-                # ── CognitiveRAG: 7-Stage Thinking Pipeline ──────
-                cognitive = self._get_cognitive_rag()
-                answer, evidence_docs, thinking_trace = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: cognitive.think_and_answer(
-                        query=inp.message,
-                        source_filter=source_filter,
-                    ),
+            main_module = inp.module if inp.module in VALID_MODULES else "localbuddy"
+            module_context = _MODULE_CONTEXTS.get(main_module, "")
+            web_search_enabled = inp.context.get("web_search_enabled", False)
+            
+            # ── 2. IRA Planning ─────────────────────────────────────
+            # Yield initial planning token
+            yield {"type": "token", "content": "🧠 *Internalizing request and drafting blueprint...*\n\n"}
+            
+            blueprint = await self.loop.run_in_executor(None, self._generate_ira_blueprint, inp.message, inp.context)
+            ira_state = IRAState(session_id=inp.session_id, blueprint=blueprint)
+            
+            final_task_results: list[str] = []
+            
+            # ── 3. Recursive Task Execution ──────────────────────────
+            while ira_state.current_task_idx < len(blueprint.tasks) and ira_state.recursion_depth < ira_state.max_recursion:
+                task = blueprint.tasks[ira_state.current_task_idx]
+                yield {"type": "token", "content": f"🔍 *Recursive Task {ira_state.current_task_idx + 1}: {task.description}...*\n\n"}
+                
+                sub_module = task.module if task.module in VALID_MODULES else "localbuddy"
+                sub_module_context = _MODULE_CONTEXTS.get(sub_module, "")
+                
+                task_context = (
+                    f"\n\nCURRENT TASK: {task.description}\n"
+                    f"Previous Findings: {ira_state.internal_history}\n"
+                    "Focus ONLY on completing this specific sub-task."
                 )
 
-                if evidence_docs:
-                    # DIRECT PASSTHROUGH: Stream CognitiveRAG answer directly
-                    # instead of running the LLM again on top of it.
-                    for word in answer.split():
-                        yield {"type": "token", "content": word + " "}
-                    memory.append(AIMessage(content=answer))
-                    return
+                if sub_module in ["ragforge", "analytics"] and self.vector_store:
+                    active_docs = inp.context.get("active_docs", [])
+                    source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
+                    cognitive = self._get_cognitive_rag()
+                    # We run the synchronous think_and_answer in the executor
+                    answer, _, _ = await self.loop.run_in_executor(
+                        None, lambda: cognitive.think_and_answer(query=task.description, source_filter=source_filter)
+                    )
+                    task_res = answer
                 else:
-                    module_context += "\n\nRetrieved Context: No relevant documents found. The Knowledge Vault may be empty."
+                    messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + sub_module_context + task_context)] + memory[1:]
+                    task_res = await self.loop.run_in_executor(None, self._run_llm_sync, messages)
 
-            messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
-            prompt = _messages_to_prompt(messages_with_context)
+                ira_state.internal_history.append({"task_id": task.id, "result": task_res})
+                final_task_results.append(f"### Research: {task.description}\n{task_res}")
+                ira_state.current_task_idx += 1
+                ira_state.recursion_depth += 1
 
-            queue = asyncio.Queue()
+            # ── 4. Final Synthesis & Streaming ───────────────────────
+            synthesis_prompt = (
+                "Synthesize the findings from your internal research tasks into a final, cohesive answer. "
+                "If a tool call is needed, output it in the ```json block.\n\n"
+                f"User Goal: {inp.message}\n"
+                f"Findings:\n" + "\n\n".join(final_task_results)
+            )
             
+            messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
+            # We append the synthesis prompt as the last message
+            messages_with_context[-1] = HumanMessage(content=synthesis_prompt)
+            
+            prompt = _messages_to_prompt(messages_with_context)
+            queue = asyncio.Queue()
+            loop = self.loop
+
             def _producer():
-                try:
-                    for tok in self._llm(
-                        prompt,
-                        max_tokens=self.settings.bitnet_max_tokens,
-                        temperature=self.settings.bitnet_temperature,
-                        top_p=self.settings.bitnet_top_p,
-                        stop=["<|im_end|>"],
-                        stream=True,
-                    ):
-                        # Use threadsafe put_nowait so we can push to the async queue from this thread
-                        asyncio.run_coroutine_threadsafe(queue.put(tok["choices"][0]["text"]), loop)
-                finally:
-                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                max_retries = 3
+                delay = 1.0
+                last_err = None
+                full_response_buffer = "" # Buffer for tokens in case of retry
+                
+                for attempt in range(max_retries):
+                    try:
+                        with self._lock:
+                            for tok in self._llm(
+                                prompt,
+                                max_tokens=self.settings.bitnet_max_tokens,
+                                temperature=self.settings.bitnet_temperature,
+                                top_p=self.settings.bitnet_top_p,
+                                stop=["<|im_end|>"],
+                                stream=True,
+                            ):
+                                chunk = tok["choices"][0]["text"]
+                                if chunk:
+                                    full_response_buffer += chunk
+                                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                        # If stream completes without error, break retry loop
+                        break 
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(f"Streaming LLM inference attempt {attempt+1} failed: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(delay)
+                            delay *= 2
+                            # Clear buffer for next attempt, or decide to keep it
+                            full_response_buffer = "" 
+                        else:
+                            # Exhausted retries, send error token
+                            error_msg = f" [⚠️ Stream Interrupted after {max_retries} attempts: {last_err}]"
+                            asyncio.run_coroutine_threadsafe(queue.put(error_msg), loop)
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
-            loop = asyncio.get_event_loop()
-            task = loop.run_in_executor(None, _producer)
-
+            task_obj = loop.run_in_executor(None, _producer)
             full_response = []
             while True:
                 tok = await queue.get()
@@ -884,7 +1220,9 @@ _MODULE_CONTEXTS: dict[str, str] = {
         "RULES: (1) When a user mentions a file like sales.csv or data.xlsx, use analyze_data to understand it. "
         "(2) When asked for a figure, plot, chart, or graph, use create_visual. "
         "(3) Before creating a visual, always verify the data points. If you don't have the data yet, call analyze_data first. "
-        "(4) Your goal is to provide comprehensive data-driven reports with visual evidence."
+        "(4) Your goal is to provide comprehensive data-driven reports with visual evidence. "
+        "(5) If 'Retrieved Context' is provided (from RAG docs), use it to identify table schemas, data formats, or specific values to analyze. "
+        "Combine RAG knowledge with analyze_data tool calls for maximum accuracy."
     ),
 }
 

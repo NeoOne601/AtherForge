@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+import structlog
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-logger = logging.getLogger("aetherforge.insight_forge")
+logger = structlog.get_logger("aetherforge.insight_forge")
 
 
 @dataclass

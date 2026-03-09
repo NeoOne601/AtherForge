@@ -1,13 +1,13 @@
 # AetherForge v1.0 — src/modules/tunelab/tools.py
 import json
-import logging
+import structlog
 import threading
 import asyncio
 from typing import Any
 
 from src.learning.replay_buffer import ReplayBuffer
 
-logger = logging.getLogger("aetherforge.tunelab.tools")
+logger = structlog.get_logger("aetherforge.tunelab.tools")
 
 def get_tools() -> list[dict[str, Any]]:
     """Return TuneLab-specific LLM tool definitions."""

@@ -14,8 +14,13 @@
 from __future__ import annotations
 
 import json
-import logging
-import sqlite3
+import structlog
+try:
+    import sqlcipher3 as sqlite3
+    HAS_SQLCIPHER = True
+except ImportError:
+    import sqlite3
+    HAS_SQLCIPHER = False
 import threading
 import time
 import uuid
@@ -23,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("aetherforge.session_store")
+logger = structlog.get_logger("aetherforge.session_store")
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -81,13 +86,14 @@ class SessionStore:
         store.get_messages(session_id) ← called on page load / restart
     """
 
-    def __init__(self, db_path: str | Path = "./data/sessions.db") -> None:
+    def __init__(self, db_path: str | Path = "./data/sessions.db", key_file: str | Path | None = None) -> None:
         self.db_path = Path(db_path)
+        self.key_file = Path(key_file) if key_file else None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()
         self._init_schema()
-        logger.info("SessionStore initialized at %s", self.db_path)
+        logger.info("SessionStore initialized at %s (SQLCipher=%s)", self.db_path, HAS_SQLCIPHER)
 
     # ── Connection ────────────────────────────────────────────────
 
@@ -97,6 +103,17 @@ class SessionStore:
                 str(self.db_path),
                 check_same_thread=False,
             )
+            if HAS_SQLCIPHER and self.key_file and self.key_file.exists():
+                try:
+                    key = self.key_file.read_text().strip()
+                    # SQLCipher needs the key immediately after opening
+                    self._conn.execute(f"PRAGMA key = '{key}'")
+                    # Verify key by trying a simple operation
+                    self._conn.execute("SELECT count(*) FROM sqlite_master")
+                    logger.debug("SessionStore: SECURE (SQLCipher active)")
+                except Exception as e:
+                    logger.error("SessionStore: Encryption key error or corrupt database: %s", e)
+            
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA foreign_keys = ON")
         return self._conn

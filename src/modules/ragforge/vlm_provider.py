@@ -6,12 +6,12 @@ Models are stored on external storage by default to preserve internal SSD space.
 from abc import ABC, abstractmethod
 import os
 from pathlib import Path
-import logging
+import structlog
 import asyncio
 from typing import Optional, Any
 import gc
 
-logger = logging.getLogger("aetherforge.ragforge.vlm_provider")
+logger = structlog.get_logger("aetherforge.ragforge.vlm_provider")
 
 # Allow users to put models on an external drive to save SSD space
 # Default to ~/.cache/atherforge/models if not specified

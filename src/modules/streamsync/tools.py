@@ -1,12 +1,12 @@
 # AetherForge v1.0 — src/modules/streamsync/tools.py
 import json
-import logging
+import structlog
 from collections import Counter
 from typing import Any
 
 from src.modules.streamsync.graph import _EVENT_STREAM
 
-logger = logging.getLogger("aetherforge.streamsync.tools")
+logger = structlog.get_logger("aetherforge.streamsync.tools")
 
 def get_tools() -> list[dict[str, Any]]:
     """Return StreamSync-specific LLM tool definitions."""

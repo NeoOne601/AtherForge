@@ -1,12 +1,12 @@
 # AetherForge v1.0 — src/modules/watchtower/tools.py
 import json
-import logging
+import structlog
 import os
 from typing import Any
 
 from src.modules.watchtower.graph import _METRIC_WINDOWS, _Z_THRESHOLD
 
-logger = logging.getLogger("aetherforge.watchtower.tools")
+logger = structlog.get_logger("aetherforge.watchtower.tools")
 
 def get_tools() -> list[dict[str, Any]]:
     """Return WatchTower-specific LLM tool definitions."""

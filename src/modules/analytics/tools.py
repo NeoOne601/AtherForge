@@ -4,7 +4,7 @@
 #
 # Provides tools for querying DataFrames and generating charts.
 # ─────────────────────────────────────────────────────────────────
-import logging
+import structlog
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,7 +12,7 @@ import seaborn as sns
 from pathlib import Path
 from typing import Any, Dict, List
 
-logger = logging.getLogger("aetherforge.analytics.tools")
+logger = structlog.get_logger("aetherforge.analytics.tools")
 
 def get_tools() -> List[Dict[str, Any]]:
     """Return the list of tools available in the analytics module."""

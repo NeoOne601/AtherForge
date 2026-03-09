@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import structlog
 import subprocess
 import tempfile
 import time
@@ -36,7 +36,7 @@ import httpx
 
 from src.config import AetherForgeSettings
 
-logger = logging.getLogger("aetherforge.silicon_colosseum")
+logger = structlog.get_logger("aetherforge.silicon_colosseum")
 
 # ── Policy Decision Result ─────────────────────────────────────────
 
@@ -177,7 +177,10 @@ class SiliconColosseum:
                 )
                 self._opa_available = result.returncode == 0
                 if self._opa_available:
-                    logger.info("OPA binary available: embedded mode active")
+                    # Write policy to a persistent file to avoid temp file I/O overhead on every request
+                    self._policy_file = self.settings.data_dir / "opa_policy.rego"
+                    self._policy_file.write_text(self._policy_source, encoding="utf-8")
+                    logger.info("OPA binary available: embedded mode active (policy at %s)", self._policy_file)
                 else:
                     logger.warning("OPA binary found but failed — falling back to Python evaluator")
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -248,31 +251,23 @@ class SiliconColosseum:
     def _eval_opa_embedded(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """
         Evaluate policy by spawning `opa eval` as a subprocess.
-        Uses a temp file for the policy + stdin for input data.
-        ~2–4 ms overhead on M1.
+        Uses a persistent policy file + stdin for input data.
         """
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".rego", delete=False, encoding="utf-8"
-            ) as f:
-                f.write(self._policy_source)
-                policy_file = f.name
-
             input_json = json.dumps({"input": input_data})
             result = subprocess.run(
                 [
                     "opa", "eval",
                     "--format", "json",
-                    "--data", policy_file,
+                    "--data", str(self._policy_file),
                     "--stdin-input",
                     "data.aetherforge.guardrails",
                 ],
                 input=input_json,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
             )
-            Path(policy_file).unlink(missing_ok=True)
 
             if result.returncode != 0:
                 logger.error("OPA eval failed: %s", result.stderr)

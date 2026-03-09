@@ -1,12 +1,12 @@
 import json
-import logging
+import structlog
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("aetherforge.sync.event_log")
+logger = structlog.get_logger("aetherforge.sync.event_log")
 
 class HybridLogicalClock:
     """

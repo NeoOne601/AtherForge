@@ -7,7 +7,7 @@
         "beforeDevCommand": "npm run dev",
         "devUrl": "http://localhost:1420",
         "beforeBuildCommand": "npm run build",
-        "frontendDist": "../frontend/dist"
+        "frontendDist": "./frontend/dist"
     },
     "app": {
         "withGlobalTauri": true,
@@ -50,12 +50,9 @@
     },
     "plugins": {
         "shell": {
-            "open": true,
-            "scope": []
+            "open": true
         },
-        "dialog": {},
-        "notification": {
-            "all": true
-        }
+        "dialog": null,
+        "notification": null
     }
 }

@@ -9,13 +9,13 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
 
-logger = logging.getLogger("aetherforge.telemetry")
+logger = structlog.get_logger("aetherforge.telemetry")
 
 
 class LangfuseExporter:

@@ -6,14 +6,14 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import time
 from collections import deque
 from typing import Any
 
 import numpy as np
 
-logger = logging.getLogger("aetherforge.watchtower")
+logger = structlog.get_logger("aetherforge.watchtower")
 
 # Sliding window for each metric stream (last 1000 samples)
 _METRIC_WINDOWS: dict[str, deque[float]] = {}

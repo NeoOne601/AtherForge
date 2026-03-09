@@ -1,5 +1,5 @@
 import asyncio
-import logging
+import structlog
 import json
 import time
 from datetime import datetime
@@ -14,7 +14,7 @@ from src.main import get_state, app
 from src.modules.ragforge_indexer import index_document
 from src.modules.streamsync.graph import emit_event
 
-logger = logging.getLogger("aetherforge.streamsync.rss")
+logger = structlog.get_logger("aetherforge.streamsync.rss")
 
 class RSSFeeder:
     def __init__(self, data_dir: Path):

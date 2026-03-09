@@ -8,10 +8,10 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 from typing import Any
 
-logger = logging.getLogger("aetherforge.ragforge")
+logger = structlog.get_logger("aetherforge.ragforge")
 
 # ── ChromaDB client (lazy init) ───────────────────────────────────
 _chroma_client: Any = None

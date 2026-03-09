@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import io
-import logging
+import structlog
 import re
 import time
 from datetime import datetime
@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.modules.session_store import SessionStore, StoredMessage
 
-logger = logging.getLogger("aetherforge.export_engine")
+logger = structlog.get_logger("aetherforge.export_engine")
 
 # ── AetherForge CSS theme for PDF output ─────────────────────────
 _PDF_CSS = """

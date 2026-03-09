@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-import logging
+import structlog
 import sqlite3
 import threading
 from pathlib import Path
@@ -24,7 +24,7 @@ from typing import Any
 
 from langchain_core.documents import Document
 
-logger = logging.getLogger("aetherforge.ragforge.sparse")
+logger = structlog.get_logger("aetherforge.ragforge.sparse")
 
 # Default RRF constant — controls how much rank position matters
 # Lower k = top-ranked results dominate more

@@ -21,7 +21,7 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import re
 import time
 from dataclasses import dataclass, field
@@ -30,7 +30,7 @@ from typing import Any, Callable, Literal
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
-logger = logging.getLogger("aetherforge.cognitiverag")
+logger = structlog.get_logger("aetherforge.cognitiverag")
 
 # ── Query types ───────────────────────────────────────────────────
 QueryType = Literal["FACTUAL", "COMPARATIVE", "SYNTHESIS", "VAGUE"]
@@ -44,6 +44,7 @@ class ThinkingTrace:
     hyde_hypothesis: str = ""
     evidence_chunks: int = 0
     reasoning_chain: str = ""
+    grounding_score: float = 1.0  # 0.0 (unsupported) to 1.0 (fully supported)
     verification_passed: bool = True
     retrieval_rounds: int = 1
     total_tokens_used: int = 0
@@ -143,13 +144,15 @@ class CognitiveRAG:
         logger.info("CognitiveRAG ⑤ CoT synthesis complete (%d chars)", len(answer))
 
         # ── Stage 6: Self-Verification ───────────────────────────
-        verification_ok = self._self_verify(query, answer, top_docs)
-        trace.verification_passed = verification_ok
-        logger.info("CognitiveRAG ⑥ Self-verification: %s",
-                    "PASSED ✓" if verification_ok else "FAILED ✗")
+        grounding_score = self._self_verify(query, answer, top_docs)
+        trace.grounding_score = grounding_score
+        trace.verification_passed = grounding_score > 0.0
+        logger.info("CognitiveRAG ⑥ Self-verification: %s (score=%.1f)",
+                    "PASSED ✓" if trace.verification_passed else "FAILED ✗",
+                    grounding_score)
 
         # ── Stage 7: Iterative Re-retrieval (if verification fails)
-        if not verification_ok and max_retries > 0:
+        if not trace.verification_passed and max_retries > 0:
             logger.info("CognitiveRAG ⑦ Re-retrieving with refined query...")
             trace.retrieval_rounds += 1
             refined_query = self._refine_query(query, answer)
@@ -433,18 +436,9 @@ class CognitiveRAG:
             if len(parts) > 1:
                 answer = parts[-1].strip()
 
-        # Expose Cognitive Trace to the UI if present
-        if reasoning:
-            clean_reasoning = reasoning
-            if clean_reasoning:
-                formatted_cot = (
-                    "<details>\n"
-                    "<summary>🧠 <b>CognitiveRAG Thinking Process</b></summary>\n\n"
-                    f"{clean_reasoning}\n\n"
-                    "</details>\n\n"
-                )
-                answer = formatted_cot + answer
-
+        # We return (clean_answer, raw_reasoning). 
+        # The formatting into <details> tags happens in the caller (MetaAgent)
+        # so SAMR-lite can score ONLY the clean_answer.
         return answer, reasoning
 
     def _get_cot_instruction(self, query_type: QueryType) -> str:
@@ -499,7 +493,7 @@ class CognitiveRAG:
         query: str,
         answer: str,
         docs: list[Document],
-    ) -> bool:
+    ) -> float:
         """
         Check if the generated answer is actually supported by the evidence.
         Returns True if verified, False if the answer may be hallucinated.
@@ -528,9 +522,13 @@ class CognitiveRAG:
         result = self.llm(messages, max_tokens=10, temperature=0.0)
         result = result.strip().upper()
 
+        score = 1.0
         if "UNSUPPORTED" in result:
-            return False
-        return True  # SUPPORTED or PARTIAL are acceptable
+            score = 0.0
+        elif "PARTIAL" in result:
+            score = 0.5
+            
+        return score
 
     # ─────────────────────────────────────────────────────────────
     # STAGE 7: Query Refinement (for re-retrieval)

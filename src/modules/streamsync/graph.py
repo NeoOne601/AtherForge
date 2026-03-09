@@ -6,13 +6,13 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
 
-logger = logging.getLogger("aetherforge.streamsync")
+logger = structlog.get_logger("aetherforge.streamsync")
 
 # Global event stream (bounded ring buffer)
 _EVENT_STREAM: deque[dict[str, Any]] = deque(maxlen=10_000)

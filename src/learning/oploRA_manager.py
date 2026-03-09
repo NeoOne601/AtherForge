@@ -48,7 +48,7 @@
 # ═══════════════════════════════════════════════════════════════
 from __future__ import annotations
 
-import logging
+import structlog
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,7 +57,7 @@ import numpy as np
 
 from src.config import AetherForgeSettings
 
-logger = logging.getLogger("aetherforge.oploRA")
+logger = structlog.get_logger("aetherforge.oploRA")
 
 
 # ── Data structures ───────────────────────────────────────────────

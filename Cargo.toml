@@ -12,6 +12,7 @@ rust-version = "1.78"
 
 [lib]
 name = "aetherforge_lib"
+path = "src-tauri/src/lib.rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]

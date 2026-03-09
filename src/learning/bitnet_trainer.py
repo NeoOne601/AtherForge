@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import structlog
 import time
 import uuid
 from datetime import datetime, timezone
@@ -33,8 +33,10 @@ from typing import Any
 from src.config import AetherForgeSettings
 from src.learning.oploRA_manager import LoRAWeights, OPLoRAManager
 from src.learning.replay_buffer import ReplayBuffer
+from src.learning.history_manager import HistoryManager
+from src.modules.streamsync.graph import emit_event
 
-logger = logging.getLogger("aetherforge.bitnet_trainer")
+logger = structlog.get_logger("aetherforge.bitnet_trainer")
 
 
 # ── Training record ───────────────────────────────────────────────
@@ -49,11 +51,13 @@ class TrainingResult:
         training_loss: float,
         duration_seconds: float,
         checkpoint_path: str,
+        bpb: float = 0.0,
     ) -> None:
         self.task_id = task_id
         self.samples_used = samples_used
         self.layers_projected = layers_projected
         self.training_loss = training_loss
+        self.bpb = bpb
         self.duration_seconds = duration_seconds
         self.checkpoint_path = checkpoint_path
         self.timestamp = datetime.now(tz=timezone.utc).isoformat()
@@ -84,6 +88,7 @@ class BitNetTrainer:
         self.settings = settings
         self.replay_buffer = replay_buffer
         self._oplora = OPLoRAManager(settings)
+        self._history = HistoryManager(settings)
         self._checkpoint_dir = settings.data_dir / "lora_checkpoints"
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,6 +102,7 @@ class BitNetTrainer:
         t0 = time.perf_counter()
 
         # ── 1. Sample from replay buffer ──────────────────────────
+        emit_event("training_started", payload={"task_id": task_id}, source="TuneLab")
         samples = await self.replay_buffer.sample(
             n=self.settings.oploра_epochs * 100,  # e.g., 300 samples
             min_faithfulness=0.85,
@@ -105,6 +111,7 @@ class BitNetTrainer:
 
         if len(samples) < 10:
             logger.info("Not enough new samples for training: %d < 10", len(samples))
+            emit_event("training_aborted", payload={"reason": "insufficient_samples", "count": len(samples)}, source="TuneLab")
             return TrainingResult(
                 task_id=task_id, samples_used=0, layers_projected=0,
                 training_loss=0.0, duration_seconds=0.0,
@@ -112,6 +119,7 @@ class BitNetTrainer:
             )
 
         logger.info("Sampled %d interactions for training", len(samples))
+        emit_event("training_sampling_complete", payload={"count": len(samples)}, source="TuneLab")
 
         # ── 2. Load existing subspaces ────────────────────────────
         self._oplora.load_checkpoints()
@@ -120,9 +128,14 @@ class BitNetTrainer:
         formatted = self._format_samples(samples)
 
         # ── 4. Run training in thread executor ───────────────────
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, self._train_sync, task_id, formatted
-        )
+        emit_event("training_running", payload={"epochs": self.settings.oploра_epochs}, source="TuneLab")
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._train_sync, task_id, formatted
+            )
+        except Exception as e:
+             emit_event("training_failed", payload={"error": str(e)}, source="TuneLab")
+             raise
 
         # ── 5. Mark samples as used ───────────────────────────────
         sample_ids = [s["id"] for s in samples]
@@ -131,14 +144,21 @@ class BitNetTrainer:
         duration = time.perf_counter() - t0
         logger.info("OPLoRA cycle complete: task_id=%s duration=%.1fs", task_id, duration)
 
-        return TrainingResult(
+        res = TrainingResult(
             task_id=task_id,
             samples_used=len(samples),
             layers_projected=result.get("layers_projected", 0),
             training_loss=result.get("final_loss", 0.0),
+            bpb=result.get("bpb", 0.0),
             duration_seconds=round(duration, 2),
             checkpoint_path=result.get("checkpoint_path", ""),
         )
+        
+        # Persist to history
+        self._history.record(res)
+        emit_event("training_completed", payload=res.to_dict(), source="TuneLab")
+        
+        return res
 
     def _format_samples(self, samples: list[dict[str, Any]]) -> list[dict[str, str]]:
         """
@@ -247,9 +267,13 @@ class BitNetTrainer:
         )
 
         logger.info("Saved OPLoRA checkpoint: %s", checkpoint_path)
+        final_loss = 0.05  # Placeholder — real training loop would compute
+        bpb = final_loss / 0.6931  # BPB = Loss / ln(2)
+        
         return {
             "layers_projected": layers_projected,
-            "final_loss": 0.05,  # Placeholder — real training loop would compute
+            "final_loss": final_loss,
+            "bpb": round(bpb, 4),
             "checkpoint_path": str(checkpoint_path),
         }
 

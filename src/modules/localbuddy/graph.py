@@ -6,11 +6,11 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import logging
+import structlog
 from collections import deque
 from typing import Any
 
-logger = logging.getLogger("aetherforge.localbuddy")
+logger = structlog.get_logger("aetherforge.localbuddy")
 
 # Session memory: session_id → deque of (role, content) pairs
 # Max 50 turns per session (~100k tokens for context management)

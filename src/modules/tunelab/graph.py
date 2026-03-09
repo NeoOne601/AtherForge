@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 import time
 from typing import Any
 
-logger = logging.getLogger("aetherforge.tunelab")
+logger = structlog.get_logger("aetherforge.tunelab")
 
 # Active training jobs: job_id → status dict
 _ACTIVE_JOBS: dict[str, dict[str, Any]] = {}

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-import logging
+import structlog
 import os
 import secrets
 import time
@@ -32,28 +32,39 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-from cryptography.fernet import Fernet
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:
+    pa = None
+    pq = None
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None
 
 from src.config import AetherForgeSettings
 
-logger = logging.getLogger("aetherforge.replay_buffer")
+logger = structlog.get_logger("aetherforge.replay_buffer")
 
 # ── Parquet schema ────────────────────────────────────────────────
 # Explicit schema ensures consistent types across all writes.
-_SCHEMA = pa.schema([
-    pa.field("id", pa.string()),
-    pa.field("session_id", pa.string()),
-    pa.field("module", pa.string()),
-    pa.field("prompt", pa.string()),
-    pa.field("response", pa.string()),
-    pa.field("faithfulness_score", pa.float32()),
-    pa.field("tool_calls_json", pa.string()),  # JSON string
-    pa.field("timestamp_utc", pa.float64()),   # Unix timestamp
-    pa.field("is_used_for_training", pa.bool_()),
-    pa.field("novelty_score", pa.float32()),   # Set by InsightForge
-])
+if pa:
+    _SCHEMA = pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("session_id", pa.string()),
+        pa.field("module", pa.string()),
+        pa.field("prompt", pa.binary()),   # Encrypted
+        pa.field("response", pa.binary()), # Encrypted
+        pa.field("faithfulness_score", pa.float32()),
+        pa.field("tool_calls_json", pa.string()),
+        pa.field("timestamp_utc", pa.float64()),
+        pa.field("is_used_for_training", pa.bool_()),
+        pa.field("novelty_score", pa.float32()),
+    ])
+else:
+    _SCHEMA = None
 
 
 class ReplayBuffer:
@@ -70,7 +81,9 @@ class ReplayBuffer:
 
     def __init__(self, settings: AetherForgeSettings) -> None:
         self.settings = settings
-        self._path = settings.replay_buffer_path
+        # Partitioned dataset directory
+        self._root_path = settings.data_dir / "replay_dataset"
+        self._path = self._root_path # For backward compatibility in logs
         self._key_file = settings.sqlcipher_key_file
         self._fernet: Fernet | None = None
         self._write_lock = asyncio.Lock()
@@ -79,29 +92,37 @@ class ReplayBuffer:
 
     async def initialize(self) -> None:
         """Load or generate encryption key and ensure Parquet file exists."""
-        self._fernet = await asyncio.get_event_loop().run_in_executor(
-            None, self._load_or_create_key
-        )
-        # Create empty Parquet file if it doesn't exist
-        if not self._path.exists():
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            empty_table = pa.table({f.name: pa.array([], type=f.type) for f in _SCHEMA}, schema=_SCHEMA)
-            pq.write_table(empty_table, self._path, compression="snappy")
-            logger.info("Created new replay buffer at %s", self._path)
+        if not Fernet:
+            logger.warning("cryptography not installed - skipping encryption key loading")
+        else:
+            self._fernet = await asyncio.get_event_loop().run_in_executor(
+                None, self._load_or_create_key
+            )
+        
+        self._root_path.mkdir(parents=True, exist_ok=True)
+        if not pa or not pq:
+            logger.warning("pyarrow not installed - skipping replay buffer initialization")
+            return
+        
+        # Check if dataset is empty or has data
+        if not any(self._root_path.iterdir()):
+            logger.info("Created new replay buffer dataset directory at %s", self._root_path)
         else:
             stats = await self.get_stats()
             logger.info(
-                "Replay buffer loaded: %d records at %s",
+                "Replay buffer loaded: %d records across %d modules at %s",
                 stats["total_records"],
-                self._path,
+                len(stats["modules"]),
+                self._root_path,
             )
 
     def _load_or_create_key(self) -> Fernet:
         """
         Load Fernet key from disk, or generate a new one.
-        Key is stored in binary (32 random bytes → base64-encoded).
-        IMPORTANT: Losing this file means losing access to all stored data.
         """
+        if not Fernet:
+            return None
+            
         key_file = self._key_file
         key_file.parent.mkdir(parents=True, exist_ok=True)
         if key_file.exists():
@@ -184,27 +205,33 @@ class ReplayBuffer:
 
     def _append_to_parquet(self, records: list[dict[str, Any]]) -> None:
         """
-        Append records to the Parquet file.
-
-        We use PyArrow's writer in APPEND mode. Since Parquet doesn't
-        natively support appending, we read existing + concatenate + rewrite.
-        For production at scale, use Delta Lake or DuckDB append-mode.
+        Append records to the partitioned Parquet dataset.
+        Encrypts prompts/responses before storage.
         """
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        new_table = pa.Table.from_pylist(records, schema=_SCHEMA)
+        encrypted_records = []
+        for r in records:
+            enc_r = r.copy()
+            if self._fernet:
+                enc_r["prompt"] = self._encrypt(r["prompt"].encode())
+                enc_r["response"] = self._encrypt(r["response"].encode())
+            else:
+                enc_r["prompt"] = r["prompt"].encode()
+                enc_r["response"] = r["response"].encode()
+            encrypted_records.append(enc_r)
 
-        if self._path.exists() and self._path.stat().st_size > 0:
-            try:
-                existing = pq.read_table(self._path)
-                combined = pa.concat_tables([existing, new_table])
-            except Exception:
-                combined = new_table
-        else:
-            combined = new_table
-
-        pq.write_table(combined, self._path, compression="snappy")
+        table = pa.Table.from_pylist(encrypted_records, schema=_SCHEMA)
+        
+        # Write to partitioned dataset (module-based folders)
+        pq.write_to_dataset(
+            table,
+            root_path=str(self._root_path),
+            partition_cols=['module'],
+            use_legacy_dataset=False,
+            existing_data_behavior='overwrite_or_ignore'
+        )
 
     async def sample(
         self,
@@ -229,49 +256,81 @@ class ReplayBuffer:
     def _read_sample(
         self,
         n: int,
-        module: str | None,
-        min_faithfulness: float,
-        exclude_used: bool,
+        module: str | None = None,
+        min_faithfulness: float = 0.0,
+        exclude_used: bool = False,
     ) -> list[dict[str, Any]]:
-        if not self._path.exists():
+        import pyarrow.parquet as pq
+        import pyarrow.compute as pc
+
+        if not self._root_path.exists() or not any(self._root_path.iterdir()):
             return []
+
         try:
-            table = pq.read_table(self._path)
-            df = table.to_pandas()
+            dataset = pq.ParquetDataset(str(self._root_path), use_legacy_dataset=False)
+            table = dataset.read()
+            
+            # Filters
+            mask = pc.field("faithfulness_score") >= min_faithfulness
             if module:
-                df = df[df["module"] == module]
-            if min_faithfulness > 0:
-                df = df[df["faithfulness_score"] >= min_faithfulness]
+                mask = pc.and_(mask, pc.field("module") == module)
             if exclude_used:
-                df = df[~df["is_used_for_training"]]
-            # Reservoir sample
-            if len(df) > n:
-                df = df.sample(n=n, random_state=42)
-            return df.to_dict(orient="records")
-        except Exception as exc:
-            logger.exception("Failed to read replay buffer: %s", exc)
+                mask = pc.and_(mask, pc.field("is_used_for_training") == False)
+                
+            filtered_table = table.filter(mask)
+            
+            # Sample (or take last N)
+            rows = filtered_table.to_pylist()
+            sampled = rows[-n:] if len(rows) > n else rows
+            
+            # Decrypt
+            for r in sampled:
+                if self._fernet:
+                    try:
+                        r["prompt"] = self._decrypt(r["prompt"]).decode()
+                        r["response"] = self._decrypt(r["response"]).decode()
+                    except Exception:
+                        r["prompt"] = "[Decryption Error]"
+                        r["response"] = "[Decryption Error]"
+                else:
+                    r["prompt"] = r["prompt"].decode()
+                    r["response"] = r["response"].decode()
+            
+            return sampled
+        except Exception as e:
+            logger.error("Failed to read sample from replay buffer: %s", e)
             return []
 
     async def get_stats(self) -> dict[str, Any]:
         """Return buffer statistics for the TuneLab dashboard."""
         def _stats() -> dict[str, Any]:
-            if not self._path.exists():
+            if not self._root_path.exists() or not any(self._root_path.iterdir()):
                 return {"total_records": 0, "size_mb": 0.0, "modules": {}}
             try:
-                table = pq.read_table(self._path)
-                df = table.to_pandas()
+                # Use dataset to read all partitions
+                import pyarrow.parquet as pq
+                dataset = pq.ParquetDataset(str(self._root_path), use_legacy_dataset=False)
+                table = dataset.read()
+                
+                total_records = len(table)
+                # Size calculation: sum of all parquet files in the dataset
+                total_size_bytes = sum(f.stat().st_size for f in self._root_path.rglob('*.parquet'))
+                
+                # Modules breakdown
+                # Note: 'module' is a transition column in partitioned datasets
+                # but pyarrow handles it correctly in the resulting table.
+                modules_col = table.column("module").to_pylist()
+                from collections import Counter
+                modules_stats = dict(Counter(modules_col))
+                
                 return {
-                    "total_records": len(df),
-                    "size_mb": round(self._path.stat().st_size / 1e6, 2),
-                    "modules": df.groupby("module").size().to_dict() if len(df) > 0 else {},
-                    "trained_count": int(df["is_used_for_training"].sum()) if len(df) > 0 else 0,
-                    "avg_faithfulness": float(df["faithfulness_score"].mean()) if len(df) > 0 else 0.0,
-                    "oldest_record": datetime.fromtimestamp(
-                        float(df["timestamp_utc"].min()), tz=timezone.utc
-                    ).isoformat() if len(df) > 0 else None,
+                    "total_records": total_records,
+                    "size_mb": round(total_size_bytes / (1024 * 1024), 2),
+                    "modules": modules_stats
                 }
-            except Exception as exc:
-                return {"error": str(exc)}
+            except Exception as e:
+                logger.error("Failed to get replay buffer stats: %s", e)
+                return {"total_records": 0, "size_mb": 0.0, "modules": {}}
 
         return await asyncio.get_event_loop().run_in_executor(None, _stats)
 

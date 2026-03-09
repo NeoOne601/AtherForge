@@ -1,11 +1,11 @@
 import asyncio
-import logging
+import structlog
 import socket
 from typing import Callable
 
 from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
 
-logger = logging.getLogger("aetherforge.sync.discovery")
+logger = structlog.get_logger("aetherforge.sync.discovery")
 
 class AetherForgeDiscovery:
     """
@@ -53,7 +53,26 @@ class AetherForgeDiscovery:
             server=f"{self.node_id}.local.",
         )
         # Offload blocking call to background thread to prevent EventLoopBlocked
-        await asyncio.to_thread(self.zeroconf.register_service, self.service_info)
+        try:
+            await asyncio.to_thread(self.zeroconf.register_service, self.service_info)
+        except Exception as e:
+            # Handle name collisions gracefully (common if previous run didn't unregister)
+            from zeroconf import NonUniqueNameException
+            if isinstance(e, NonUniqueNameException) or "NonUniqueNameException" in str(e):
+                logger.warning(f"mDNS name collision for {self.node_id}, retrying with suffix...")
+                import time
+                suffix = int(time.time()) % 1000
+                self.service_info = ServiceInfo(
+                    type_=self.SERVICE_TYPE,
+                    name=f"{self.node_id}-{suffix}.{self.SERVICE_TYPE}",
+                    addresses=[socket.inet_aton(local_ip)],
+                    port=self.port,
+                    properties=b"",
+                    server=f"{self.node_id}-{suffix}.local.",
+                )
+                await asyncio.to_thread(self.zeroconf.register_service, self.service_info)
+            else:
+                raise e
 
         # 2. Browse for peers
         self.browser = ServiceBrowser(self.zeroconf, self.SERVICE_TYPE, handlers=[self._on_service_state_change])

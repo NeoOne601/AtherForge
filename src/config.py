@@ -41,12 +41,14 @@ class AetherForgeSettings(BaseSettings):
     # n_gpu_layers=-1 → offload all layers to Metal GPU on M1.
     # n_ctx=4096 → context window: 4k tokens, balanced speed/quality.
     bitnet_model_path: Path = Path("./models/bitnet-b1.58-2b-4t.gguf")
-    bitnet_n_ctx: int = Field(default=4096, ge=512, le=32768)
+    bitnet_n_ctx: int = Field(default=8192, ge=512, le=32768)
     bitnet_n_gpu_layers: int = Field(default=-1, ge=-1)  # -1 = all
     bitnet_n_threads: int = Field(default=8, ge=1, le=64)
     bitnet_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     bitnet_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     bitnet_max_tokens: int = Field(default=1024, ge=64, le=8192)
+    # Maximum concurrent session memories to keep in RAM (P1 LRU eviction)
+    max_session_memories: int = Field(default=100, ge=1, le=1000)
 
     # ── Silicon Colosseum / Guardrails ────────────────────────────
     # OPA can run embedded (subprocess) or as a separate server.
