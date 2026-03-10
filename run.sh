@@ -32,10 +32,10 @@ echo "⚙️ Starting AetherForge Backend..."
 export PYTHONPATH=$(pwd)
 export KMP_DUPLICATE_LIB_OK=TRUE
 # Run backend in background so we can show next steps
-python3 src/main.py serve --port 8765 --host 127.0.0.1 > backend.log 2>&1 &
+python3 src/main.py serve --port 8765 --host 127.0.0.1 > data/logs/backend.log 2>&1 &
 BACKEND_PID=$!
 
-echo "✅ Backend started in background (PID: $BACKEND_PID). Logs are in backend.log."
+echo "✅ Backend started in background (PID: $BACKEND_PID). Logs are in data/logs/backend.log."
 echo ""
 echo "🚀 To launch the Frontend, choose one:"
 echo "   1. Desktop (Recommended): npm run tauri:dev"
