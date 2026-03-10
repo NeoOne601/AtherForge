@@ -41,3 +41,11 @@ async def learning_capacity(request: Request) -> JSONResponse:
         "capacity_pct": round(capacity * 100, 1),
         "total_tasks": sum(len(v) for v in manager._subspaces.values())
     })
+@router.post("/learning/refine-text")
+async def refine_text(request: Request) -> JSONResponse:
+    from src.schemas import RefineRequest
+    data = await request.json()
+    refine_req = RefineRequest(**data)
+    state = request.app.state.app_state
+    refined = await state.meta_agent.refine_text(refine_req.text)
+    return JSONResponse({"refined": refined})

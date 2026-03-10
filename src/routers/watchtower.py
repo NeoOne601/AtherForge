@@ -93,3 +93,22 @@ async def list_modules() -> JSONResponse:
             {"id": "tunelab", "name": "TuneLab", "icon": "tool", "description": "Offline Learning"}
         ]
     })
+@router.get("/metrics/stream")
+async def get_metrics_stream() -> JSONResponse:
+    """Returns real-time system metrics for HUD display."""
+    import psutil
+    try:
+        cpu = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory().percent
+        net_io = psutil.net_io_counters()
+        # Mocking network throughput since we don't have a history for diffing in this simple GET
+        net_val = round((net_io.bytes_sent + net_io.bytes_recv) / (1024 * 1024 * 10), 2) # MB/10s approximation
+        
+        return JSONResponse({
+            "cpu": {"value": cpu, "z_score": 0.0, "is_anomaly": cpu > 90},
+            "mem": {"value": mem, "z_score": 0.0, "is_anomaly": mem > 90},
+            "net": {"value": net_val, "z_score": 0.0, "is_anomaly": False}
+        })
+    except Exception as e:
+        logger.error("Error in metrics stream: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)

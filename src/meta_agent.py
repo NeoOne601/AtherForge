@@ -741,11 +741,12 @@ class MetaAgent:
             ira_state.recursion_depth += 1
 
         # ── 5. Final Synthesis ────────────────────────────────────
+        findings_header = "Retrieved Context:" if main_module == "ragforge" else "Findings:"
         synthesis_prompt = (
-            "Synthesize the findings from your internal research tasks into a final, cohesive answer. "
+            f"Synthesize the {findings_header} from your internal research tasks into a final, cohesive answer. "
             "If a tool call is needed based on these findings, output it in the ```json block.\n\n"
             f"User Goal: {inp.message}\n"
-            f"Findings:\n" + "\n\n".join(final_task_results)
+            f"{findings_header}\n" + "\n\n".join(final_task_results)
         )
         
         messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context), HumanMessage(content=synthesis_prompt)]
@@ -792,12 +793,17 @@ class MetaAgent:
                 elif tool_name == "search_web" and web_search_enabled:
                     try:
                         from ddgs import DDGS
-                        with DDGS() as ddgs:
-                            query = tool_args.get("query", "")
-                            if inp.system_location and len(query.split()) < 3 and "in" not in query.lower():
-                                query = f"{query} in {inp.system_location}"
-                            logger.info("Executing Web Search: %s", query)
-                            results = list(ddgs.text(query, max_results=5))
+                        query = tool_args.get("query", "")
+                        if inp.system_location and len(query.split()) < 3 and "in" not in query.lower():
+                            query = f"{query} in {inp.system_location}"
+                        logger.info("Executing Web Search: %s", query)
+
+                        # Use a separate thread to run the potentially slow DDGS call to avoid blocking
+                        def _ddgs_call():
+                            with DDGS() as ddgs:
+                                return list(ddgs.text(query, max_results=5))
+                        
+                        results = await self.loop.run_in_executor(None, _ddgs_call)
                         if not results:
                             tool_output = "No results found on the internet for this query."
                         else:
@@ -1100,11 +1106,12 @@ class MetaAgent:
                 ira_state.recursion_depth += 1
 
             # ── 4. Final Synthesis & Streaming ───────────────────────
+            findings_header = "Retrieved Context:" if main_module == "ragforge" else "Findings:"
             synthesis_prompt = (
-                "Synthesize the findings from your internal research tasks into a final, cohesive answer. "
+                f"Synthesize the {findings_header} from your internal research tasks into a final, cohesive answer. "
                 "If a tool call is needed, output it in the ```json block.\n\n"
                 f"User Goal: {inp.message}\n"
-                f"Findings:\n" + "\n\n".join(final_task_results)
+                f"{findings_header}\n" + "\n\n".join(final_task_results)
             )
             
             messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]

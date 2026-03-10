@@ -30,6 +30,7 @@ source .venv/bin/activate
 # 4. Backend Launch with correct PYTHONPATH
 echo "⚙️ Starting AetherForge Backend..."
 export PYTHONPATH=$(pwd)
+export KMP_DUPLICATE_LIB_OK=TRUE
 # Run backend in background so we can show next steps
 python3 src/main.py serve --port 8765 --host 127.0.0.1 > backend.log 2>&1 &
 BACKEND_PID=$!

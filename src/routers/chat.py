@@ -95,12 +95,6 @@ async def chat(request: ChatRequest, fastapi_request: Request) -> ChatResponse:
     finally:
         CHAT_SEMAPHORE.release()
 
-@router.post("/refine-text")
-async def refine_text(request: RefineRequest, fastapi_request: Request) -> dict[str, str]:
-    state = fastapi_request.app.state.app_state
-    refined = await state.meta_agent.refine_text(request.text)
-    return {"refined": refined}
-
 @router.get("/chat-models")
 async def get_chat_models(fastapi_request: Request):
     # Retrieve models (hardcoded local models)
