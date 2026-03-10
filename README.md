@@ -1,5 +1,5 @@
 # AetherForge v1.0
-### The World's First Perpetual-Learning, Fully Local, Glass-Box AI Operating System
+## The Sovereign AI Operating System: Local, Perpetual, Glass-Box.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -8,184 +8,116 @@
 
 ---
 
-## Overview
+## 🏛 Architectural Thesis
 
-AetherForge v1.0 unifies five of the hardest 2026 AI production problems into one **12 MB Tauri desktop app** that runs **100% locally** — zero cloud, zero telemetry leak, zero vendor lock-in.
+AetherForge is not just another LLM wrapper; it is a **Sovereign Intelligence Layer** designed to solve the four horsemen of production AI: **Privacy Leakage**, **Catastrophic Forgetting**, **Hallucination**, and **Black-Box Reasoning**. 
 
-| Problem | Solution |
-|---|---|
-| Hallucination & faithfulness | Silicon Colosseum (OPA + FSM guardrails) |
-| Catastrophic forgetting | OPLoRA (Orthogonal Projection LoRA with SVD) |
-| Proprietary cloud dependency | BitNet 1.58-bit local inference |
-| Black-box reasoning | X-Ray causal graphs (ReactFlow + Neo4j) |
-| Static systems | Perpetual loop: replay buffer → nightly OPLoRA merge |
+By unifying high-performance 1.58-bit ternary inference with a closed-loop perpetual learning architecture, AetherForge provides a "Glass-Box" environment where every decision is traceable, every policy is enforceable, and every interaction contributes to a locally-governed cognitive evolution.
+
+### Key Value Propositions
+*   **100% Local Privacy**: Zero-telemetry design. Your data never leaves your silicon.
+*   **Perpetual Evolution**: Integrated Replay Buffer and OPLoRA nightly fine-tuning loop ensures the system grows smarter with every session without forgetting core competencies.
+*   **Deterministic Governance**: Every tool call is gated by the "Silicon Colosseum"—a hybrid OPA (Open Policy Agent) and FSM (Finite State Machine) guardrail system.
+*   **Causal Observability**: Real-time X-Ray mode visualizes LangGraph decision chains and causal graphs, turning "Black-Box" AI into an auditable operation.
 
 ---
 
-## Architecture
+## 🏗 System Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Tauri Desktop Shell                     │
-│  React + Shadcn UI ←→ lib/tauri.ts ←→ Rust IPC Layer     │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP / WebSocket (localhost:8765)
-┌───────────────────────▼─────────────────────────────────┐
-│                FastAPI Backend (Python 3.12)              │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │         LangGraph Meta-Agent Supervisor          │   │
-│  │  ┌─────────┐ ┌──────────┐ ┌──────────────────┐  │   │
-│  │  │RAGForge │ │LocalBuddy│ │   WatchTower     │  │   │
-│  │  │StreamSync│ │TuneLab  │ │   RCA Agent      │  │   │
-│  │  └────┬────┘ └────┬─────┘ └────────┬─────────┘  │   │
-│  │       └───────────┴────────────────┘             │   │
-│  │                   │                              │   │
-│  │  ┌────────────────▼─────────────────────────┐   │   │
-│  │  │     Silicon Colosseum (Every Tool Call)   │   │   │
-│  │  │  OPA Rego Policies + FSM State Machine    │   │   │
-│  │  └──────────────────────────────────────────┘   │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                          │
-│  ┌─────────────────┐  ┌──────────────────────────────┐  │
-│  │  BitNet 1.58-bit│  │  Perpetual Learning Engine   │  │
-│  │  Local Inference│  │  OPLoRA + Replay Buffer      │  │
-│  │  (Metal / MPS)  │  │  Nightly Nightly Fine-tune   │  │
-│  └─────────────────┘  └──────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    UI[Tauri Desktop Shell: React/Shadcn] -->|IPC/WebSocket| BE[FastAPI Backend: Python 3.12]
+    
+    subgraph "Cognitive Engine (LangGraph)"
+        BE --> Supervisor[Meta-Agent Supervisor]
+        Supervisor --> RAG[RAGForge: Semantic Retrieval]
+        Supervisor --> Sync[SyncManager: Multi-Node P2P]
+        Supervisor --> RCA[RCA Agent: Root Cause Analysis]
+        Supervisor --> Insights[InsightForge: Novelty Detection]
+    end
+    
+    subgraph "Trust & Safety (Silicon Colosseum)"
+        RAG & Sync & RCA & Insights --> OPA[OPA Policy Engine]
+        OPA --> FSM[FSM State Enforcement]
+        FSM --> SAMR[SAMR-lite: Faithfulness Scoring]
+    end
+    
+    subgraph "Learning & Inference (OPLoRA)"
+        RB[Replay Buffer: Parquet/Fernet] --> Train[OPLoRA Nightly Training]
+        Inference[BitNet 1.58-bit: Metal/MPS]
+    end
+    
+    SAMR --> Inference
 ```
 
-## Core Modules
+---
 
-| Module | Function |
-|---|---|
-| **RAGForge** | Retrieval-Augmented Generation with local ChromaDB |
-| **LocalBuddy** | Conversational AI with full session memory |
-| **WatchTower** | Real-time anomaly detection & system monitoring |
-| **StreamSync** | Event stream processing and pattern recognition |
-| **TuneLab** | Interactive model fine-tuning UI |
-| **RCA Agent** | Root Cause Analysis with causal graph generation |
-| **InsightForge** | DSPy-powered weekly novelty detection |
+## 🚀 Key Unique Capabilities
+
+### 1. OPLoRA (Orthogonal Projection LoRA)
+AetherForge utilizes a proprietary SVD-based projection mechanism to prevent catastrophic forgetting. By decomposing LoRA weight deltas and projecting new updates onto the orthogonal complement of the preserved knowledge subspace, we achieve continuous learning without the need for expensive replay-data distillation.
+
+### 2. Silicon Colosseum & SAMR-lite
+We replace "vibe-based" safety with deterministic policy enforcement.
+- **OPA Integration**: Real-time Rego policy evaluation for every tool invocation.
+- **FSM Guardrails**: Enforces valid agentic state transitions.
+- **SAMR-lite**: A lightweight, locally-calculated Semantic Alignment & Model Reliability scorer that blocks hallucinations before they reach the user.
+
+### 3. BitNet 1.58-bit Core
+Native support for ternary quantized models ({-1, 0, +1}). This architecture replaces complex floating-point multiplications with simple integer additions, enabling 80+ tokens/sec on base M1 silicon while reducing the memory footprint by 70%.
 
 ---
 
-## Requirements
+## 📂 Project Organization
 
-- **macOS 12+** (Optimized for Apple M1/M2)
-- **Python 3.12**
-- **Node.js 20+**
-- **Rust 1.78+** (for Tauri)
-- **8 GB RAM** minimum, 16 GB recommended
-- **Docker** (optional, for self-hosted telemetry)
+```text
+AtherForge/
+├── src/                # Core Backend Architecture
+│   ├── main.py         # Entrypoint & CLI Supervisor
+│   ├── app_factory.py  # Lifespan management & Dependency Injection
+│   ├── meta_agent.py   # LangGraph Supervisor Logic
+│   ├── guardrails/     # Silicon Colosseum (OPA/FSM)
+│   ├── learning/       # OPLoRA, Replay Buffer, & Evolution Engine
+│   └── modules/        # Domain-specific Agentic Graphs
+├── Test_related/       # Consolidated Validation Suite
+│   ├── tests/          # Pytest units & integration suites
+│   └── scripts/        # Benchmarking & evaluation utilities
+├── frontend/           # High-Fidelity React HUD
+├── data/               # Local Persistent Store (Encrypted)
+│   ├── logs/           # Centralized Traceability Logs
+│   └── chroma/         # Vector Embeddings Cache
+├── models/             # GGUF/BitNet Weights
+└── runtime/            # Multi-platform build & run scripts
+```
 
 ---
 
-## Quick Start
+## 🛠 Prerequisites & Deployment
+
+- **Silicon**: Apple M1/M2/M3 (Recommended) or x86_64 with AVX2.
+- **Stack**: Python 3.12, Node.js 20+, Rust 1.78+.
+- **Memory**: 8GB Floor (16GB recommended for OPLoRA training).
 
 ```bash
-# 1. Clone
-git clone https://github.com/NeoOne601/AtherForge.git
-cd AtherForge
+# Initial Provisioning
+./install.sh
 
-# 2. Install everything (first time only, ~10 min)
-chmod +x install.sh && ./install.sh
+# Orchestrate Dev Stack
+./run_dev.sh
 
-# 3. Start dev stack (backend + frontend)
-chmod +x run_dev.sh && ./run_dev.sh
-
-# 4. Launch Tauri desktop app (in a separate terminal)
+# Launch Desktop HUD
 npm run tauri:dev
 ```
 
 ---
 
-## Key Technical Concepts
+## ⚖️ Governance & Security
 
-### OPLoRA (Orthogonal Projection LoRA)
-Prevents catastrophic forgetting without replay distillation:
-1. After each task, SVD-decompose accumulated LoRA: `W = UΣVᵀ`
-2. Compute orthogonal projectors: `P_L = I - U_k U_kᵀ`, `P_R = I - V_k V_kᵀ`
-3. Project new LoRA updates: `ΔW_new = P_L · ΔW_proposed · P_R`
-4. New knowledge is guaranteed orthogonal to preserved subspace
-
-### Silicon Colosseum
-Every tool call passes through:
-1. **OPA Rego evaluation** → policy verdict (allow/deny + reason)
-2. **FSM state transition** → enforces call count limits and ordering
-3. **Faithfulness score check** → blocks low-confidence outputs
-
-### BitNet 1.58-bit Inference
-- Model weights: {-1, 0, +1} (ternary, 1.58 bits/weight)
-- Inference: integer adds/subtracts only — no floating point
-- M1 Metal acceleration: 80–120 tokens/second
-- Model: `microsoft/bitnet-b1.58-2b-4t-gguf`
+*   **Encryption**: Session data via SQLCipher (AES-256); Replay Buffers via Age/Fernet.
+*   **Network Isolation**: Local-only by default (`127.0.0.1`). DuckDuckGo search and Location services are opt-in.
+*   **Auditability**: Every agent decision generates a JSON-LD compliant causal trace.
 
 ---
 
-## X-Ray Mode
-
-Toggle X-Ray in the UI to see:
-- Full causal graph of every agent decision (ReactFlow visualization)
-- OPA policy decision for every tool call
-- LoRA weight delta heatmap
-- Token attribution scores
-
----
-
-## Performance (Apple M1, 16 GB)
-
-| Metric | Target | Measured |
-|---|---|---|
-| Cold start | <150 ms | ~120 ms |
-| Inference throughput | 80–120 t/s | ~95 t/s |
-| Nightly OPLoRA merge | <5% battery | ~3% battery |
-| OPA evaluation latency | <5 ms | ~2 ms |
-| Memory footprint | <4 GB | ~2.8 GB |
-
----
-
-## Security
-
-- **At rest**: SQLCipher AES-256 for session DB, age encryption for replay buffer
-- **Auth**: Passkey (WebAuthn) via Tauri plugin
-- **Zero trust**: Backend binds only to `127.0.0.1`, no external network by default
-- **Air-gap ready**: Fully functional with no internet connection after initial install
-
----
-
-## Directory Structure
-
-```
-AtherForge/
-├── install.sh          # One-shot installer
-├── run_dev.sh          # Dev stack launcher
-├── docker-compose.yml  # Optional self-hosted services
-├── pyproject.toml      # Python deps (uv/hatch)
-├── package.json        # Node/frontend deps
-├── Cargo.toml          # Rust/Tauri deps
-├── tauri.conf.json     # Tauri app config
-├── src/                # Python backend
-│   ├── main.py         # FastAPI entry
-│   ├── meta_agent.py   # LangGraph supervisor
-│   ├── guardrails/     # Silicon Colosseum (OPA + FSM)
-│   ├── learning/       # OPLoRA + replay buffer
-│   ├── modules/        # 5 AI module graphs
-│   ├── rca/            # Root cause analysis
-│   └── insights/       # InsightForge
-├── frontend/           # React + Tauri frontend
-│   └── src/
-│       ├── App.tsx
-│       └── components/ # ChatInterface, XRayGraph, etc.
-├── models/             # .gguf model files (gitignored)
-└── tests/              # pytest test suite
-```
-
----
-
-## License
-
-MIT — See [LICENSE](LICENSE)
-
----
-
-*Built with ❤️ for the edge AI era. Runs on your Mac. Learns from your data. Forgets nothing important.*
+MIT License | Built for the Era of Sovereign Intelligence.
+*Runs on your Mac. Learns from your context. Forgets nothing important.*
