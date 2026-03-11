@@ -19,14 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import json
 import structlog
-import os
 import threading
 import time
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal, Optional
+from typing import Any, Literal, Optional
+from collections.abc import AsyncGenerator
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -36,20 +33,41 @@ from src.guardrails.silicon_colosseum import SiliconColosseum
 
 logger = structlog.get_logger("aetherforge.meta_agent")
 
-_SYSTEM_PROMPT = (
-    "You are AetherForge, a local AI assistant. You run entirely on-device and "
-    "never send data to the cloud. "
-    "For every task, first think through the problem step by step, then present "
-    "a clear, structured answer to the user. "
-    "Prefer numbered lists or sections for non-trivial problems, and call out any "
-    "assumptions you make. "
-    "Be concise, accurate, and transparent about uncertainty while aiming for the "
-    "same depth and thoroughness as a state-of-the-art assistant like ChatGPT.\n\n"
-    "TOOL CALLING RULES (CRITICAL):\n"
-    "1. You MUST call a tool if the user's request requires live data (weather, news, system stats).\n"
-    "2. Output the tool call in a ```json block BEFORE any other text.\n"
-    "3. Do NOT invent data if a tool can provide it."
-)
+_SYSTEM_PROMPT_VARIANTS = {
+    "v1": (
+        "You are AetherForge, a local AI assistant. You run entirely on-device and "
+        "never send data to the cloud. "
+        "Present a clear, structured answer to the user. "
+        "Prefer numbered lists or sections for non-trivial problems, and call out any "
+        "assumptions you make. "
+        "Be concise, accurate, and transparent about uncertainty.\n\n"
+        "THINKING RULES:\n"
+        "Before answering, briefly reason through the problem inside <think> tags. "
+        "Put ONLY your final answer OUTSIDE the <think> tags. Example:\n"
+        "<think>The user is asking about X. I should consider Y and Z.</think>\n"
+        "Here is my answer about X...\n\n"
+        "TOOL CALLING RULES (CRITICAL):\n"
+        "1. You MUST call a tool if the user's request requires live data (weather, news, system stats).\n"
+        "2. Output the tool call in a ```json block BEFORE any other text.\n"
+        "3. Do NOT invent data if a tool can provide it."
+    ),
+    "v2": (
+        "You are AetherForge, a highly capable local AI running entirely on-device. "
+        "Your first priority is FAITHFULNESS and TRUTH. Do not hallucinate. "
+        "When explaining complex topics, use clear analogies and well-formatted markdown. "
+        "If you are unsure, state 'I don't know' rather than guessing.\n\n"
+        "THINKING PROCESS:\n"
+        "You must analyze every request internally before responding. Use <think> tags "
+        "for your step-by-step reasoning. Only write your final response outside the tags.\n"
+        "<think>1. Identify intent. 2. Verify constraints. 3. Formulate answer.</think>\n"
+        "Final response goes here.\n\n"
+        "TOOL PROTOCOL (MANDATORY):\n"
+        "If the user asks for real-time information (e.g. current weather), you MUST trigger a tool. "
+        "Format the tool call as a JSON block immediately.\n"
+        "```json\n{\"name\": \"tool_name\", \"arguments\": {...}}\n```"
+    )
+}
+
 
 
 def _messages_to_prompt(messages: list[Any]) -> str:
@@ -182,16 +200,34 @@ class MetaAgent:
     serialize concurrent requests.
     """
 
-    def __init__(self, settings: AetherForgeSettings, colosseum: SiliconColosseum, vector_store: Any = None, replay_buffer: Any = None) -> None:
+    def __init__(
+        self, 
+        settings: AetherForgeSettings, 
+        colosseum: SiliconColosseum, 
+        vector_store: Any = None, 
+        sparse_index: Any = None,
+        replay_buffer: Any = None
+    ) -> None:
         self.settings = settings
         self.colosseum = colosseum
         self.vector_store = vector_store
         self.replay_buffer = replay_buffer
+        self._sparse_index = sparse_index
         self._llm: Any = None
-        self._lock = threading.Lock()
+        # Use asyncio.Lock for async-safe model switching, threading.Lock for sync inference
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self._sync_lock: threading.Lock = threading.Lock()
         self._session_memories: collections.OrderedDict[str, list[Any]] = collections.OrderedDict()
-        self._sparse_index: Any = None  # FTS5 sparse index (lazy init)
-        self.loop = asyncio.get_event_loop()
+        
+        # Declare lazy-initialized attributes explicitly to satisfy static analysis
+        self._cognitive_rag_instance: Optional[Any] = None
+        self._researcher_instance: Optional[Any] = None
+        self.loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+        # Headroom attributes (declared here; conditionally initialized below)
+        self.token_counter: Any = None
+        self.headroom_tokenizer: Any = None
+        self.headroom_config: Any = None
+        self.context_manager: Any = None
 
         # ── Headroom Context Optimization ─────────────────────
         try:
@@ -200,8 +236,8 @@ class MetaAgent:
             from headroom.transforms.intelligent_context import IntelligentContextManager
             from headroom.config import IntelligentContextConfig
 
-            # Using llama-3 tokenizer backend as a good approximation for BitNet/Llama-based GGUFs
-            self.token_counter = OpenAICompatibleTokenCounter(model="llama3.1")
+            # Use gpt-3.5-turbo tokenizer as a safe proxy for BitNet/Llama token counting
+            self.token_counter = OpenAICompatibleTokenCounter(model="gpt-3.5-turbo")
             self.headroom_tokenizer = Tokenizer(self.token_counter)
             self.headroom_config = IntelligentContextConfig(
                 enabled=True,
@@ -327,8 +363,8 @@ class MetaAgent:
                 if not repo_id:
                     raise FileNotFoundError(f"Model file {filename} missing and no repo to pull from.")
                 logger.info("Downloading %s from HuggingFace (%s)...", filename, repo_id)
-                def _download():
-                    return hf_hub_download(
+                def _download() -> str:
+                    return hf_hub_download(  # type: ignore[return-value]
                         repo_id=repo_id,
                         filename=filename,
                         local_dir=str(self.settings.bitnet_model_path.parent)
@@ -340,6 +376,7 @@ class MetaAgent:
             self.settings.bitnet_model_path = target_path
             await self._load_model()
             return True
+        return False  # pragma: no cover
 
     def _run_llm_sync(self, messages: list[Any], max_tokens: int | None = None, temperature: float | None = None) -> str:
         """Run the LLM synchronously (called from pipeline nodes)."""
@@ -380,21 +417,21 @@ class MetaAgent:
     def _call_llm_with_retry(self, prompt: str, **kwargs: Any) -> str:
         """Calls the LLM with exponential backoff for transient failures."""
         max_retries = 3
-        delay = 1.0
-        last_err = None
+        delay: float = 1.0
+        last_err: Optional[Exception] = None
         
         for attempt in range(max_retries):
             try:
                 # Thread-safe LLM access (serialize actual inference but not pipeline)
-                with self._lock:
+                with self._sync_lock:
                     result = self._llm(prompt, **kwargs)
                 return str(result["choices"][0]["text"]).strip()
             except Exception as e:
                 last_err = e
                 logger.warning(f"LLM inference attempt {attempt+1} failed: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    delay *= 2
+                    time.sleep(float(delay))
+                    delay = float(delay) * 2.0
                     
         logger.error(f"LLM inference exhausted {max_retries} attempts. Final error: {last_err}")
         return f"⚠️ LLM Error: I encountered a transient failure processing this request after {max_retries} attempts."
@@ -485,7 +522,7 @@ class MetaAgent:
 
         # Fallback: dense-only (ChromaDB)
         logger.info("Dense-only search for '%s...' (sparse index not loaded yet)", query[:50])
-        filter_kwargs = {}
+        filter_kwargs: dict[str, Any] = {}
         if source_filter:
             if isinstance(source_filter, str):
                 filter_kwargs["filter"] = {"source": source_filter}
@@ -617,141 +654,144 @@ class MetaAgent:
         VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
         main_module = inp.module if inp.module in VALID_MODULES else "localbuddy"
         module_context = _MODULE_CONTEXTS.get(main_module, "")
-        web_search_enabled = inp.context.get("web_search_enabled", False)
         
-        tool_module = None
-        tools_list = []
-        few_shot = ""
+        if inp.system_location:
+            module_context += (
+                f"\n\nUSER LOCATION: The user is currently located in {inp.system_location}. "
+                f"When the user says 'my location', 'my city', 'here', or 'where I am', "
+                f"always use '{inp.system_location}' as the location argument.\n"
+            )
+        # web_search_enabled is checked via tools_list; not needed as a local flag
+        
+        from src.core.tool_registry import tool_registry
+        tools_list = tool_registry.get_tool_definitions()
 
-        # Load Intent Tools if applicable
-        if main_module in {"watchtower", "streamsync", "tunelab"}:
-            try:
-                import importlib
-                tool_module = importlib.import_module(f"src.modules.{main_module}.tools")
-                if hasattr(tool_module, "get_tools"):
-                    tools_list.extend(tool_module.get_tools())
-            except Exception as e:
-                logger.error("Failed to load Intent Tools for %s: %s", main_module, e)
-
-        # Inject Web Search & Weather tools if enabled
-        if web_search_enabled:
-            tools_list.append({
-                "name": "search_web",
-                "description": "Searches the live internet (via DuckDuckGo) for up-to-date factual information, news, or live data.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query to look up on the internet."}
-                    },
-                    "required": ["query"]
-                }
-            })
-            # ... (adding weather tool)
-            tools_list.append({
-                "name": "get_weather",
-                "description": "Gets the current weather for a specific city or location using SI units (°C, km/h).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string", "description": "City and country or a well-known place name."}
-                    },
-                    "required": ["location"]
-                }
-            })
+        # Inject Web Search & Weather tools if enabled (Legacy injection for backward compatibility with prompt)
+        # Note: These are now properly registered in CoreModule as well.
 
         # Pre-process module context with tools
         if tools_list:
             import json
             tools_def = json.dumps(tools_list, indent=2)
-            module_context += f"\n\nAVAILABLE TOOLS:\n{tools_def}\n\nCall tools using ```json block."
-
-        # ── 4. IRA Core: Planning & Recursive Loop ──────────────────
-        blueprint = self._generate_ira_blueprint(inp.message, inp.context)
-        ira_state = IRAState(session_id=inp.session_id, blueprint=blueprint)
-        _trace("planning", {"goal": blueprint.goal, "tasks": len(blueprint.tasks)})
-
-        final_task_results: list[str] = []
-        
-        # Execute each task in the blueprint
-        while ira_state.current_task_idx < len(blueprint.tasks) and ira_state.recursion_depth < ira_state.max_recursion:
-            task = blueprint.tasks[ira_state.current_task_idx]
-            task.status = "running"
-            _trace(f"executing_{task.id}", {"description": task.description, "module": task.module})
-            
-            # Sub-task module context
-            sub_module = task.module if task.module in VALID_MODULES else "localbuddy"
-            sub_module_context = _MODULE_CONTEXTS.get(sub_module, "")
-            
-            t_task = time.perf_counter()
-            task_context = (
-                f"\n\nCURRENT TASK: {task.description}\n"
-                f"Previous Findings: {ira_state.internal_history}\n"
-                "Focus ONLY on completing this specific sub-task."
+            module_context += (
+                f"\n\nAVAILABLE TOOLS:\n{tools_def}\n\n"
+                "To call a tool, you MUST output a JSON block EXCLUSIVELY in this format:\n"
+                "```json\n"
+                "{\n"
+                "  \"name\": \"<tool_name>\",\n"
+                "  \"arguments\": {<tool_args>}\n"
+                "}\n"
+                "```\n"
             )
 
-            # Execution
-            if "optimize" in task.description.lower() or "evolution" in task.description.lower():
-                researcher = self._get_aether_researcher()
-                # Determine benchmark type based on description
-                b_type = "rag"
-                if "tune" in task.description.lower() or "learning" in task.description.lower():
-                    b_type = "learning"
-                
-                # Setup benchmark function
-                if b_type == "rag":
-                    from src.modules.ragforge.benchmarker import RAGBenchmarker
-                    from src.modules.ragforge.history_manager import RAGHistoryManager
-                    rm = RAGHistoryManager(self.settings)
-                    bench = RAGBenchmarker(self._get_cognitive_rag(), rm)
-                    b_fn = bench.run_suite
-                else:
-                    from src.learning.benchmarker import BitNetBenchmarker
-                    from src.learning.bitnet_trainer import BitNetTrainer
-                    trainer = BitNetTrainer(self.settings, self.replay_buffer)
-                    bench = BitNetBenchmarker(trainer)
-                    b_fn = bench.run_sprint
-                
-                # Note: run_evolution_cycle is async
-                # Since we are in _run_sync (run_in_executor), we need to run it in the existing loop
-                record = asyncio.run_coroutine_threadsafe(researcher.run_evolution_cycle(b_fn), self.loop).result()
-                task_res = (
-                    f"Autonomous Evolution Cycle Complete.\n"
-                    f"Experiment: {record.experiment_id}\n"
-                    f"Mutation: {record.mutation_target} ({record.initial_value} -> {record.new_value})\n"
-                    f"Metric: {record.baseline_metric:.4f} -> {record.new_metric:.4f}\n"
-                    f"Decision: **{record.status.upper()}**"
-                )
-            elif sub_module in ["ragforge", "analytics"] and self.vector_store:
-                active_docs = inp.context.get("active_docs", [])
-                source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
-                cognitive = self._get_cognitive_rag()
-                answer, _, _ = cognitive.think_and_answer(query=task.description, source_filter=source_filter)
-                task_res = answer
-            else:
-                messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + sub_module_context + task_context)] + memory[1:]
-                task_res = self._run_llm_sync(messages)
-
-            task.result = task_res
-            task.status = "completed"
-            ira_state.internal_history.append({"task_id": task.id, "result": task_res})
-            final_task_results.append(f"### Research: {task.description}\n{task_res}")
-            
-            _trace(f"finished_{task.id}", {"latency_ms": (time.perf_counter() - t_task) * 1000})
-            ira_state.current_task_idx += 1
-            ira_state.recursion_depth += 1
-
-        # ── 5. Final Synthesis ────────────────────────────────────
-        findings_header = "Retrieved Context:" if main_module == "ragforge" else "Findings:"
-        synthesis_prompt = (
-            f"Synthesize the {findings_header} from your internal research tasks into a final, cohesive answer. "
-            "If a tool call is needed based on these findings, output it in the ```json block.\n\n"
-            f"User Goal: {inp.message}\n"
-            f"{findings_header}\n" + "\n\n".join(final_task_results)
+        # ── 4. Direct Execution (no IRA blueprint overhead) ─────────
+        # Small models (2B-8B) can't reliably generate JSON plans.
+        # Skip the planning LLM call entirely and use the user's
+        # original message as the single task — saves 8-15s per query.
+        blueprint = IRABlueprint(
+            goal=inp.message,
+            tasks=[BlueprintTask(
+                id="task_1", description=inp.message, module=main_module,
+            )],
         )
-        
-        messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context), HumanMessage(content=synthesis_prompt)]
-        response_text = self._run_llm_sync(messages)
-        _trace("synthesis", {"response_len": len(response_text)})
+        _trace("planning", {"goal": blueprint.goal, "tasks": 1})
+
+        t_task = time.perf_counter()
+
+        # ── 4a. RAGForge / Analytics: CognitiveRAG with user's original query
+        if main_module in ("ragforge", "analytics") and self.vector_store:
+            active_docs = inp.context.get("active_docs", [])
+            source_filter = (
+                active_docs[0] if len(active_docs) == 1 else active_docs
+            )
+            cognitive = self._get_cognitive_rag()
+            
+            # Fetch prompt variant from evolution manager if available
+            rag_variant = "v1"
+            res_instance = getattr(self, "_researcher_instance", None)
+            if res_instance is not None and getattr(res_instance, "manager", None):
+                rag_variant = getattr(res_instance.manager.current_genome, "rag_prompt_variant", "v1")
+                
+            answer, retrieved_doc_texts_raw, ragforge_trace = (
+                cognitive.think_and_answer(
+                    query=inp.message,  # always the user's original question
+                    source_filter=source_filter,
+                    prompt_variant=rag_variant
+                )
+            )
+            response_text = answer
+            if isinstance(retrieved_doc_texts_raw, list):
+                retrieved_doc_texts = [
+                    getattr(d, "page_content", str(d))
+                    for d in retrieved_doc_texts_raw
+                ]
+
+        # ── 4b. Evolution / Optimization tasks
+        elif (
+            "optimize" in inp.message.lower()
+            or "evolution" in inp.message.lower()
+        ):
+            researcher = self._get_aether_researcher()
+            b_type = "rag"
+            if (
+                "tune" in inp.message.lower()
+                or "learning" in inp.message.lower()
+            ):
+                b_type = "learning"
+
+            if b_type == "rag":
+                from src.modules.ragforge.benchmarker import RAGBenchmarker
+                from src.modules.ragforge.history_manager import (
+                    RAGHistoryManager,
+                )
+                rm = RAGHistoryManager(self.settings)
+                bench = RAGBenchmarker(
+                    self._get_cognitive_rag(), 
+                    rm, 
+                    self.vector_store.embeddings if self.vector_store else None
+                )
+                b_fn = bench.run_suite
+            else:
+                from src.learning.benchmarker import BitNetBenchmarker
+                from src.learning.bitnet_trainer import BitNetTrainer
+                trainer = BitNetTrainer(self.settings, self.replay_buffer)
+                bench = BitNetBenchmarker(trainer)
+                b_fn = bench.run_sprint
+
+            record = asyncio.run_coroutine_threadsafe(
+                researcher.run_evolution_cycle(b_fn), self.loop,
+            ).result()
+            response_text = (
+                f"Autonomous Evolution Cycle Complete.\n"
+                f"Experiment: {record.experiment_id}\n"
+                f"Mutation: {record.mutation_target} "
+                f"({record.initial_value} -> {record.new_value})\n"
+                f"Metric: {record.baseline_metric:.4f} -> "
+                f"{record.new_metric:.4f}\n"
+                f"Decision: **{record.status.upper()}**"
+            )
+
+        # ── 4c. General LLM response (LocalBuddy, etc.)
+        else:
+            # Fetch prompt variant from evolution manager if available
+            sys_variant = "v1"
+            res_instance = getattr(self, "_researcher_instance", None)
+            if res_instance is not None and getattr(res_instance, "manager", None):
+                sys_variant = getattr(res_instance.manager.current_genome, "system_prompt_variant", "v1")
+            sys_prompt = _SYSTEM_PROMPT_VARIANTS.get(sys_variant, _SYSTEM_PROMPT_VARIANTS["v1"])
+            
+            messages_with_context = [
+                SystemMessage(
+                    content=sys_prompt + "\n\n" + module_context,
+                ),
+                *memory[1:],
+            ]
+            response_text = self._run_llm_sync(messages_with_context)
+
+        _trace("execution", {
+            "latency_ms": (time.perf_counter() - t_task) * 1000,
+            "module": main_module,
+        })
         _trace(f"module_{main_module}", {"latency_ms": (time.perf_counter() - t0) * 1000, "response_preview": response_text[:100]})
 
         # Tool Execution Loop
@@ -765,146 +805,120 @@ class MetaAgent:
         # Look for markdown JSON blocks, or just the first JSON-like dictionary it outputs
         json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', response_text, re.DOTALL)
         if not json_match:
-            json_match = re.search(r'(\{.*\"(?:tool_name|name)\".*\})', response_text, re.DOTALL)
+            json_match = re.search(r'(\{.*\"(?:tool_name|name|tool|function)\".*\})', response_text, re.DOTALL)
             
         if json_match:
             try:
                 import json
+                import types
                 tool_call_json = json_match.group(1)
-                
-                logger.debug("Matched Intent JSON: %s", tool_call_json)
+
+                logger.debug(
+                    "Matched Intent JSON: %s", tool_call_json,
+                )
                 call_data = json.loads(tool_call_json)
-                
-                # Support both "tool_name": "name" and "name": "name" depending on how the model formats it
-                tool_name = call_data.get("tool_name") or call_data.get("name")
-                
+
+                # Support both "tool_name", "name", and "tool" keys
+                tool_name = (
+                    call_data.get("tool_name")
+                    or call_data.get("name")
+                    or call_data.get("tool")
+                )
+
                 if not tool_name and "function" in call_data:
-                    # Model output an OpenAI-style function call json
                     tool_name = call_data["function"].get("name")
-                    tool_args = call_data["function"].get("arguments", {})
+                    tool_args = call_data["function"].get(
+                        "arguments", {},
+                    )
                 else:
                     tool_args = call_data.get("arguments", {})
-                
-                # Execute tool
-                tool_output: str | None = None
-                
-                if not tool_name:
-                    logger.debug("JSON block found but no tool_name or name field present. Skipping tool execution.")
-                elif tool_name == "search_web" and web_search_enabled:
-                    try:
-                        from ddgs import DDGS
-                        query = tool_args.get("query", "")
-                        if inp.system_location and len(query.split()) < 3 and "in" not in query.lower():
-                            query = f"{query} in {inp.system_location}"
-                        logger.info("Executing Web Search: %s", query)
 
-                        # Use a separate thread to run the potentially slow DDGS call to avoid blocking
-                        def _ddgs_call():
-                            with DDGS() as ddgs:
-                                return list(ddgs.text(query, max_results=5))
-                        
-                        results = await self.loop.run_in_executor(None, _ddgs_call)
-                        if not results:
-                            tool_output = "No results found on the internet for this query."
-                        else:
-                            chunks = [f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}" for r in results]
-                            tool_output = "\n\n".join(chunks)
-                    except Exception as e:
-                        tool_output = f"Web search failed: {e}"
-                        logger.error(tool_output)
-
-                elif tool_name == "get_weather" and web_search_enabled:
-                    # Live weather via Open-Meteo (no API key, SI units by default).
-                    try:
-                        import httpx
-                        location = (tool_args.get("location") or "").strip()
-                        if not location and getattr(inp, "system_location", None):
-                            location = inp.system_location
-                        if not location:
-                            tool_output = "Weather lookup failed: no location provided."
-                        else:
-                            with httpx.Client(timeout=5.0) as client:
-                                geo_resp = client.get(
-                                    "https://geocoding-api.open-meteo.com/v1/search",
-                                    params={"name": location, "count": 1, "language": "en", "format": "json"},
-                                )
-                                geo = geo_resp.json()
-                                results = geo.get("results") or []
-                                if not results:
-                                    tool_output = f"Weather lookup failed: could not resolve location '{location}'."
-                                else:
-                                    place = results[0]
-                                    lat = place.get("latitude")
-                                    lon = place.get("longitude")
-                                    resolved_name = f"{place.get('name', '')}, {place.get('country', '')}".strip(", ")
-                                    wx_resp = client.get(
-                                        "https://api.open-meteo.com/v1/forecast",
-                                        params={
-                                            "latitude": lat,
-                                            "longitude": lon,
-                                            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
-                                            "temperature_unit": "celsius",
-                                            "wind_speed_unit": "kmh",
-                                            "timezone": "auto",
-                                        },
-                                    )
-                                    wx = wx_resp.json()
-                                    current = wx.get("current") or {}
-                                    t = current.get("temperature_2m")
-                                    feels = current.get("apparent_temperature")
-                                    rh = current.get("relative_humidity_2m")
-                                    rain = current.get("precipitation")
-                                    wind = current.get("wind_speed_10m")
-                                    tool_output = (
-                                        f"Resolved location: {resolved_name} (lat {lat}, lon {lon})\n"
-                                        f"Temperature: {t} °C (feels like {feels} °C)\n"
-                                        f"Relative humidity: {rh}%\n"
-                                        f"Precipitation: {rain} mm\n"
-                                        f"Wind speed: {wind} km/h\n"
-                                        "All values are in SI units (°C, km/h, mm)."
-                                    )
-                    except Exception as e:
-                        tool_output = f"Weather lookup failed: {e}"
-                        logger.error(tool_output)
-                        
-                elif tool_module and hasattr(tool_module, "execute_tool"):
-                    import inspect
-                    sig = inspect.signature(tool_module.execute_tool)
-                    if "state" in sig.parameters:
-                        class MockState: pass
-                        mock_state = MockState()
-                        mock_state.replay_buffer = self.replay_buffer
-                        mock_state.settings = self.settings
-                        tool_output = str(tool_module.execute_tool(tool_name, tool_args, mock_state))
-                    else:
-                        tool_output = str(tool_module.execute_tool(tool_name, tool_args))
-                
-                if tool_output is not None:
-                    tool_calls.append({"name": tool_name, "arguments": tool_args, "result": tool_output})
-                    
-                    # Update internal history for IRA
-                    causal_nodes.append({"id": f"tool_{tool_name}", "data": {"args": tool_args, "result": tool_output[:100]}, "ts": time.perf_counter()})
-                    
-                    if not messages_with_context:
-                        messages_with_context = list(memory)
-                        
-                    messages_with_context.append(AIMessage(content=response_text))
-                    messages_with_context.append(SystemMessage(content=(
-                        f"Tool '{tool_name}' executed successfully and returned the following live data:\n{tool_output}\n\n"
-                        "Respond to the user in plain language summarizing the findings. "
-                        "Be direct — state the actual facts retrieved. Do NOT say 'I don't have access', "
-                        "'as an AI', or 'I cannot'. The data is provided above. Synthesize it clearly and concisely."
-                    )))
-                    
-                    t1 = time.perf_counter()
-                    response_text = self._run_llm_sync(messages_with_context)
-                    tool_executed_successfully = True
-                    _trace(f"tool_execution_{tool_name}", {"result": str(tool_output)[:50], "latency_ms": (time.perf_counter() - t1) * 1000})
+                # ── Guard: skip if tool name is None / empty ──
+                if not tool_name or tool_name == "None":
+                    logger.warning(
+                        "LLM emitted a tool call with no name "
+                        "— skipping tool execution",
+                    )
                 else:
-                    response_text = f"[Intent Engine Error] Tool '{tool_name}' was not recognized or is disabled in the current context."
+                    from src.core.tool_registry import tool_registry
+
+                    mock_state = types.SimpleNamespace(
+                        replay_buffer=self.replay_buffer,
+                        settings=self.settings,
+                    )
+
+                    tool_output = str(
+                        tool_registry.execute_tool(
+                            tool_name, tool_args, state=mock_state,
+                        ),
+                    )
+
+                    if tool_output:
+                        tool_calls.append({
+                            "name": tool_name,
+                            "arguments": tool_args,
+                            "result": tool_output,
+                        })
+
+                        causal_nodes.append({
+                            "id": f"tool_{tool_name}",
+                            "data": {
+                                "args": tool_args,
+                                "result": tool_output[:100],
+                            },
+                            "ts": time.perf_counter(),
+                        })
+
+                        if not messages_with_context:
+                            messages_with_context = list(memory)
+
+                        messages_with_context.append(
+                            AIMessage(content=response_text),
+                        )
+                        messages_with_context.append(
+                            SystemMessage(content=(
+                                f"Tool '{tool_name}' executed "
+                                "successfully and returned the "
+                                "following live data:\n"
+                                f"{tool_output}\n\n"
+                                "Respond to the user in plain "
+                                "language summarizing the findings. "
+                                "Be direct — state the actual facts "
+                                "retrieved. Do NOT say 'I don't have "
+                                "access', 'as an AI', or 'I cannot'. "
+                                "The data is provided above. Synthesize "
+                                "it clearly and concisely."
+                            )),
+                        )
+
+                        t1 = time.perf_counter()
+                        response_text = self._run_llm_sync(
+                            messages_with_context,
+                        )
+                        tool_executed_successfully = True
+                        _trace(
+                            f"tool_execution_{tool_name}",
+                            {
+                                "result": str(tool_output)[:50],
+                                "latency_ms": (
+                                    time.perf_counter() - t1
+                                ) * 1000,
+                            },
+                        )
+                    else:
+                        response_text = (
+                            f"[Intent Engine Error] Tool "
+                            f"'{tool_name}' was not recognized or "
+                            "is disabled in the current context."
+                        )
             except Exception as e:
-                logger.error("Intent Engine Tool execution failed: %s", e)
-                response_text = f"[Intent Engine Error] Failed to execute the requested system tool: {e}"
+                logger.error(
+                    "Intent Engine Tool execution failed: %s", e,
+                )
+                response_text = (
+                    "[Intent Engine Error] Failed to execute "
+                    f"the requested system tool: {e}"
+                )
 
         # ── 4. Optional Deep Reasoning Reflection Pass ─────────────
         deep_reasoning_enabled = bool(inp.context.get("deep_reasoning", False))
@@ -957,10 +971,9 @@ class MetaAgent:
                 # Prepend the reasoning trace if available (ONLY for ragforge)
                 if ragforge_trace and ragforge_trace.reasoning_chain:
                     formatted_cot = (
-                        "<details>\n"
-                        "<summary>🧠 <b>CognitiveRAG Thinking Process</b></summary>\n\n"
-                        f"{ragforge_trace.reasoning_chain}\n\n"
-                        "</details>\n\n"
+                        "<think>\n"
+                        f"{ragforge_trace.reasoning_chain}\n"
+                        "</think>\n\n"
                     )
                     response_text = formatted_cot + response_text
 
@@ -1062,75 +1075,97 @@ class MetaAgent:
             VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "analytics"}
             main_module = inp.module if inp.module in VALID_MODULES else "localbuddy"
             module_context = _MODULE_CONTEXTS.get(main_module, "")
-            web_search_enabled = inp.context.get("web_search_enabled", False)
             
-            # ── 2. IRA Planning ─────────────────────────────────────
-            # Yield initial planning token
-            yield {"type": "token", "content": "🧠 *Internalizing request and drafting blueprint...*\n\n"}
-            
-            blueprint = await self.loop.run_in_executor(None, self._generate_ira_blueprint, inp.message, inp.context)
-            ira_state = IRAState(session_id=inp.session_id, blueprint=blueprint)
-            
-            final_task_results: list[str] = []
-            
-            # ── 3. Recursive Task Execution ──────────────────────────
-            while ira_state.current_task_idx < len(blueprint.tasks) and ira_state.recursion_depth < ira_state.max_recursion:
-                task = blueprint.tasks[ira_state.current_task_idx]
-                yield {"type": "token", "content": f"🔍 *Recursive Task {ira_state.current_task_idx + 1}: {task.description}...*\n\n"}
+            if inp.system_location:
+                module_context += (
+                    f"\n\nUSER LOCATION: The user is currently located in {inp.system_location}. "
+                    f"When the user says 'my location', 'my city', 'here', or 'where I am', "
+                    f"always use '{inp.system_location}' as the location argument.\n"
+                )
                 
-                sub_module = task.module if task.module in VALID_MODULES else "localbuddy"
-                sub_module_context = _MODULE_CONTEXTS.get(sub_module, "")
-                
-                task_context = (
-                    f"\n\nCURRENT TASK: {task.description}\n"
-                    f"Previous Findings: {ira_state.internal_history}\n"
-                    "Focus ONLY on completing this specific sub-task."
+            from src.core.tool_registry import tool_registry
+            tools_list = tool_registry.get_tool_definitions()
+            if tools_list:
+                import json
+                tools_def = json.dumps(tools_list, indent=2)
+                module_context += (
+                    f"\n\nAVAILABLE TOOLS:\n{tools_def}\n\n"
+                    "To call a tool, you MUST output a JSON block EXCLUSIVELY in this format:\n"
+                    "```json\n"
+                    "{\n"
+                    "  \"name\": \"<tool_name>\",\n"
+                    "  \"arguments\": {<tool_args>}\n"
+                    "}\n"
+                    "```\n"
                 )
 
-                if sub_module in ["ragforge", "analytics"] and self.vector_store:
-                    active_docs = inp.context.get("active_docs", [])
-                    source_filter = active_docs[0] if len(active_docs) == 1 else active_docs
-                    cognitive = self._get_cognitive_rag()
-                    # We run the synchronous think_and_answer in the executor
-                    answer, _, _ = await self.loop.run_in_executor(
-                        None, lambda: cognitive.think_and_answer(query=task.description, source_filter=source_filter)
+            # ── 2. Direct execution (no IRA planning overhead) ──────
+            # For RAG: run CognitiveRAG synchronously, then yield result
+            if main_module in ("ragforge", "analytics") and self.vector_store:
+                active_docs = inp.context.get("active_docs", [])
+                sf = active_docs[0] if len(active_docs) == 1 else active_docs
+                cog = self._get_cognitive_rag()
+                msg = inp.message  # bind for closure
+                
+                # Fetch prompt variant from evolution manager if available
+                rag_variant = "v1"
+                res_instance = getattr(self, "_researcher_instance", None)
+                if res_instance is not None and getattr(res_instance, "manager", None):
+                    rag_variant = getattr(res_instance.manager.current_genome, "rag_prompt_variant", "v1")
+
+                answer, _, ragforge_trace = await self.loop.run_in_executor(
+                    None,
+                    lambda _c=cog, _q=msg, _sf=sf, _rv=rag_variant: _c.think_and_answer(
+                        query=_q, source_filter=_sf, prompt_variant=_rv
+                    ),
+                )
+
+                # Yield thinking trace FIRST so frontend shows it before the answer
+                full_response = ""
+                if ragforge_trace and ragforge_trace.reasoning_chain:
+                    think_block = (
+                        "<think>\n"
+                        f"{ragforge_trace.reasoning_chain}\n"
+                        "</think>\n\n"
                     )
-                    task_res = answer
-                else:
-                    messages = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + sub_module_context + task_context)] + memory[1:]
-                    task_res = await self.loop.run_in_executor(None, self._run_llm_sync, messages)
+                    yield {"type": "token", "content": think_block}
+                    full_response += think_block
 
-                ira_state.internal_history.append({"task_id": task.id, "result": task_res})
-                final_task_results.append(f"### Research: {task.description}\n{task_res}")
-                ira_state.current_task_idx += 1
-                ira_state.recursion_depth += 1
+                # Then yield the answer
+                yield {"type": "token", "content": answer}
+                full_response += answer
+                memory.append(AIMessage(content=full_response))
+                return
 
-            # ── 4. Final Synthesis & Streaming ───────────────────────
-            findings_header = "Retrieved Context:" if main_module == "ragforge" else "Findings:"
-            synthesis_prompt = (
-                f"Synthesize the {findings_header} from your internal research tasks into a final, cohesive answer. "
-                "If a tool call is needed, output it in the ```json block.\n\n"
-                f"User Goal: {inp.message}\n"
-                f"{findings_header}\n" + "\n\n".join(final_task_results)
-            )
+            # ── 3. General LLM streaming (LocalBuddy, etc.) ─────────
             
-            messages_with_context = [SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context)] + memory[1:]
-            # We append the synthesis prompt as the last message
-            messages_with_context[-1] = HumanMessage(content=synthesis_prompt)
+            # Fetch prompt variant from evolution manager if available
+            sys_variant = "v1"
+            res_instance = getattr(self, "_researcher_instance", None)
+            if res_instance is not None and getattr(res_instance, "manager", None):
+                sys_variant = getattr(res_instance.manager.current_genome, "system_prompt_variant", "v1")
+            sys_prompt = _SYSTEM_PROMPT_VARIANTS.get(sys_variant, _SYSTEM_PROMPT_VARIANTS["v1"])
+            
+            messages_with_context = [
+                SystemMessage(
+                    content=sys_prompt + "\n\n" + module_context,
+                ),
+                *memory[1:],
+            ]
             
             prompt = _messages_to_prompt(messages_with_context)
-            queue = asyncio.Queue()
+            queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
             loop = self.loop
 
-            def _producer():
+            def _producer() -> None:
                 max_retries = 3
-                delay = 1.0
-                last_err = None
-                full_response_buffer = "" # Buffer for tokens in case of retry
+                delay: float = 1.0
+                last_err: Optional[Exception] = None
+                full_response_buffer: str = ""  # Buffer for tokens in case of retry
                 
                 for attempt in range(max_retries):
                     try:
-                        with self._lock:
+                        with self._sync_lock:  # threading.Lock: safe to use in a thread
                             for tok in self._llm(
                                 prompt,
                                 max_tokens=self.settings.bitnet_max_tokens,
@@ -1139,9 +1174,9 @@ class MetaAgent:
                                 stop=["<|im_end|>"],
                                 stream=True,
                             ):
-                                chunk = tok["choices"][0]["text"]
+                                chunk: str = tok["choices"][0]["text"]
                                 if chunk:
-                                    full_response_buffer += chunk
+                                    full_response_buffer = str(full_response_buffer) + str(chunk)
                                     asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
                         # If stream completes without error, break retry loop
                         break 
@@ -1149,8 +1184,8 @@ class MetaAgent:
                         last_err = e
                         logger.warning(f"Streaming LLM inference attempt {attempt+1} failed: {e}")
                         if attempt < max_retries - 1:
-                            time.sleep(delay)
-                            delay *= 2
+                            time.sleep(float(delay))
+                            delay = float(delay) * 2.0
                             # Clear buffer for next attempt, or decide to keep it
                             full_response_buffer = "" 
                         else:
@@ -1159,7 +1194,7 @@ class MetaAgent:
                             asyncio.run_coroutine_threadsafe(queue.put(error_msg), loop)
                 asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
-            task_obj = loop.run_in_executor(None, _producer)
+            loop.run_in_executor(None, _producer)  # fire-and-forget
             full_response = []
             while True:
                 tok = await queue.get()
@@ -1167,8 +1202,28 @@ class MetaAgent:
                     break
                 full_response.append(tok)
                 yield {"type": "token", "content": tok}
-                
-            memory.append(AIMessage(content="".join(full_response)))
+
+            # Strip unexecuted tool call JSON from the accumulated response
+            # This prevents raw JSON blobs like {"name": "...", "arguments": {...}}
+            # from appearing in the chat when the LLM hallucinates a tool call.
+            import re as _re
+            joined = "".join(full_response)
+            cleaned = _re.sub(
+                r'```(?:json)?\s*\{[^}]*"(?:name|tool_name|tool|function)"[^}]*\}\s*```',
+                '',
+                joined,
+                flags=_re.DOTALL,
+            ).strip()
+            # Also strip bare JSON tool calls (no markdown fences)
+            cleaned = _re.sub(
+                r'\{\s*"(?:name|tool_name|tool|function)"\s*:.*?"arguments"\s*:\s*\{.*?\}\s*\}',
+                '',
+                cleaned,
+                flags=_re.DOTALL,
+            ).strip()
+            if not cleaned:
+                cleaned = "I wasn't able to process that request. Could you rephrase?"
+            memory.append(AIMessage(content=cleaned))
 
 
 # ── Module Context Strings ────────────────────────────────────────

@@ -74,12 +74,36 @@ async def upload_document(request: Request, file: UploadFile = File(...)) -> JSO
 @router.get("/vlm-options")
 async def get_vlm_options(request: Request):
     """List available Vision Language Models for RAG enrichment."""
-    options = [
-        {"id": "smolvlm-256m", "name": "SmolVLM (256M)", "hardware_rating": "optimal"},
-        {"id": "moondream-2b", "name": "Moondream 2 (2B)", "hardware_rating": "optimal"},
-        {"id": "llava-v1.5-7b", "name": "LLaVA v1.5 (7B)", "hardware_rating": "warning"}
-    ]
-    return {"options": options, "selected": "smolvlm-256m"}
+    import platform
+    from src.modules.ragforge.vlm_provider import list_providers
+    
+    providers = list_providers()
+    is_mac = platform.system() == "Darwin"
+    
+    options = []
+    default_vlm = "smolvlm-256m"
+    
+    # Logic for hardware rating and default selection
+    for p in providers:
+        hw_rating = "optimal"
+        if p.id == "apple-vlm" and not is_mac:
+            continue # Only show Apple VLM on Mac
+        
+        if p.id == "ollama-qwen3.5-9b":
+            hw_rating = "warning" # High RAM requirement
+            
+        options.append({
+            "id": p.id,
+            "name": p.name,
+            "hardware_rating": hw_rating,
+            "tier": p.tier
+        })
+        
+        # Default to apple-vlm on Mac if available
+        if is_mac and p.id == "apple-vlm":
+            default_vlm = "apple-vlm"
+            
+    return {"options": options, "selected": default_vlm}
 
 @router.post("/vlm-select")
 async def select_vlm(payload: dict, request: Request):

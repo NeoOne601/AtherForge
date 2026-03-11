@@ -7,10 +7,11 @@ import { InsightsPanel } from "./components/Panels/InsightsPanel";
 import { PoliciesPanel } from "./components/Panels/PoliciesPanel";
 import { SyncPanel } from "./components/Panels/SyncPanel";
 import { LoggerPanel } from "./components/Panels/LoggerPanel";
+import { SettingsPanel } from "./components/Panels/SettingsPanel";
 
 export default function App() {
     const [activeModule, setActiveModule] = useState("localbuddy");
-    const [activePanel, setActivePanel] = useState<"chat" | "insights" | "policies" | "sync">("chat");
+    const [activePanel, setActivePanel] = useState<"chat" | "insights" | "policies" | "sync" | "settings">("chat");
     const [xrayOpen, setXrayOpen] = useState(false);
     const [online, setOnline] = useState(false);
     const [cpuPct, setCpuPct] = useState<number | null>(null);
@@ -242,6 +243,10 @@ export default function App() {
                         onClick={() => setActivePanel("sync")}>
                         🔗 Sync Devices
                     </button>
+                    <button className={`nav-btn ${activePanel === "settings" ? "active" : ""}`}
+                        onClick={() => setActivePanel("settings")}>
+                        ⚙️ Settings
+                    </button>
 
                     <div className="sidebar-divider" />
                     <button
@@ -316,6 +321,7 @@ export default function App() {
                     {activePanel === "insights" && <InsightsPanel />}
                     {activePanel === "policies" && <PoliciesPanel />}
                     {activePanel === "sync" && <SyncPanel />}
+                    {activePanel === "settings" && <SettingsPanel />}
                 </main>
 
                 {xrayOpen && <XRayPanel />}

@@ -90,6 +90,7 @@ export function ChatPanel({
     const [loading, setLoading] = useState(false);
     const [refining, setRefining] = useState(false);
     const [streaming, setStreaming] = useState(true);
+    const [showThinking, setShowThinking] = useState(true);
     const [xrayGraphByModule, setXrayGraphByModule] = useState<Record<string, CausalGraph | null>>({});
 
     const bottomRef = useRef<HTMLDivElement>(null);
@@ -267,15 +268,20 @@ export function ChatPanel({
                     ) : (
                         <>
                             {messages.map(m => (
-                                <MessageBubble key={m.id} msg={m} />
+                                <MessageBubble key={m.id} msg={m} showThinking={showThinking} />
                             ))}
                             {loading && (
                                 <div className="message-row">
                                     <div className="avatar ai pulse">Æ</div>
-                                    <div className="typing-indicator">
-                                        <div className="typing-dot" />
-                                        <div className="typing-dot" />
-                                        <div className="typing-dot" />
+                                    <div className="bubble ai" style={{ padding: "12px 16px" }}>
+                                        <div style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "6px" }}>
+                                            🧠 Thinking...
+                                        </div>
+                                        <div className="typing-indicator">
+                                            <div className="typing-dot" />
+                                            <div className="typing-dot" />
+                                            <div className="typing-dot" />
+                                        </div>
                                     </div>
                                 </div>
                             )}
@@ -350,6 +356,12 @@ export function ChatPanel({
                             )}
                         </div>
 
+                        <label className="stream-toggle" style={{ marginLeft: "12px" }}>
+                            <div className={`toggle-track ${showThinking ? "on" : ""}`} onClick={() => setShowThinking(v => !v)}>
+                                <div className="toggle-thumb" />
+                            </div>
+                            Show Thinking
+                        </label>
                         <label className="stream-toggle">
                             <div className={`toggle-track ${streaming ? "on" : ""}`} onClick={() => setStreaming(v => !v)}>
                                 <div className="toggle-thumb" />

@@ -10,6 +10,7 @@ import structlog
 import asyncio
 from typing import Optional, Any
 import gc
+from src.config import get_settings
 
 logger = structlog.get_logger("aetherforge.ragforge.vlm_provider")
 
@@ -277,6 +278,95 @@ class FlorenceProvider(VLMProvider):
         return await asyncio.to_thread(_analyze)
 
 
+# ── Apple VLM Provider (MLX-VLM) ──────────────────────────────────
+ 
+class AppleVLMProvider(VLMProvider):
+    """
+    Tier 3: Apple Optimized (Apple-VLM)
+    Optimized for Apple Silicon using mlx-vlm.
+    Loads from external drive by default.
+    """
+    
+    def __init__(self):
+        self.model = None
+        self.processor = None
+        self.device = "mps" # Always mps for Apple VLM
+        self.settings = get_settings()
+        
+    @property
+    def id(self) -> str: return "apple-vlm"
+    
+    @property
+    def name(self) -> str: return "Apple VLM (Optimized)"
+    
+    @property
+    def required_ram_gb(self) -> float: return 4.0
+    
+    @property
+    def tier(self) -> str: return "Optimized (Apple)"
+ 
+    async def load_model(self) -> None:
+        if self.model is not None:
+            return
+            
+        import torch # Just to ensure we're on a torch-compatible path logic-wise if needed
+        try:
+            import mlx_vlm
+            from mlx_vlm.utils import load
+        except ImportError:
+            logger.error("mlx-vlm not installed. Apple VLM requires 'pip install mlx-vlm'")
+            return
+            
+        logger.info("Loading %s from %s...", self.name, self.settings.apple_vlm_model_path)
+        
+        def _load():
+            # mlx-vlm.utils.load returns (model, processor)
+            self.model, self.processor = load(str(self.settings.apple_vlm_model_path))
+            
+        await asyncio.to_thread(_load)
+        logger.info("%s loaded successfully.", self.name)
+ 
+    async def unload_model(self) -> None:
+        if self.model is not None:
+            logger.info("Unloading %s...", self.name)
+            del self.model
+            del self.processor
+            self.model = None
+            self.processor = None
+            gc.collect()
+            # MLX manages its own memory, but gc.collect() helps Python
+ 
+    async def analyze_image(self, image_bytes: bytes, prompt: str) -> str:
+        if self.model is None:
+            await self.load_model()
+            if self.model is None:
+                return "ERROR: Apple VLM not available (mlx-vlm missing or model not found)"
+            
+        from PIL import Image
+        import io
+        
+        def _analyze():
+            try:
+                import mlx_vlm
+                from mlx_vlm.utils import generate
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                
+                # Generate using mlx-vlm
+                response = generate(
+                    self.model,
+                    self.processor,
+                    image,
+                    prompt,
+                    verbose=False
+                )
+                return response.strip()
+            except Exception as e:
+                logger.error("Apple VLM analysis failed: %s", e)
+                return f"ERROR: Apple VLM failed: {str(e)}"
+ 
+        return await asyncio.to_thread(_analyze)
+ 
+ 
 # QwenVLProvider removed — requires gated HuggingFace token and CUDA GPTQ.
 # Use OllamaQwenProvider (Tier 3 / Ultra) instead: fully offline, no token,
 # runs qwen3.5:9b via a separate Ollama process (no Python RAM overhead).
@@ -413,6 +503,7 @@ class OllamaQwenVL2BProvider(OllamaQwenProvider):
 AVAILABLE_PROVIDERS = [
     SmolVLMProvider,
     FlorenceProvider,
+    AppleVLMProvider,
     OllamaQwenVL2BProvider,
     OllamaQwenProvider,
 ]

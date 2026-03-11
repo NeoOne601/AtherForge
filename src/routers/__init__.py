@@ -7,3 +7,4 @@ from .export import router as export_router
 from .guardrails import router as guardrails_router
 from .learning import router as learning_router
 from .sync import router as sync_router
+from .settings import router as settings_router

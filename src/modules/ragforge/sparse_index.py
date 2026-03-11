@@ -51,6 +51,7 @@ class SparseIndex:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")  # concurrent reads
+        assert self._conn is not None
         return self._conn
 
     def _ensure_schema(self) -> None:
@@ -175,11 +176,12 @@ class SparseIndex:
     def delete_by_source(self, source: str) -> int:
         """Delete all chunks from a specific source file."""
         conn = self._get_conn()
-        cursor = conn.execute(
-            "DELETE FROM chunks WHERE json_extract(metadata, '$.source') = ?",
-            (source,),
-        )
-        conn.commit()
+        with self._write_lock:
+            cursor = conn.execute(
+                "DELETE FROM chunks WHERE json_extract(metadata, '$.source') = ?",
+                (source,),
+            )
+            conn.commit()
         deleted = cursor.rowcount
         logger.info("FTS5: deleted %d chunks from source '%s'", deleted, source)
         return deleted

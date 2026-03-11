@@ -35,6 +35,10 @@ class SelfOptGenome(BaseModel):
     # System Genes
     deep_reasoning_temp: float = Field(default=0.7, ge=0.0, le=1.5)
     faithfulness_threshold: float = Field(default=0.85, ge=0.5, le=1.0)
+    
+    # Prompt Genes
+    system_prompt_variant: str = Field(default="v1")
+    rag_prompt_variant: str = Field(default="v1")
 
 class ExperimentRecord(BaseModel):
     """Metadata for a single mutation experiment."""

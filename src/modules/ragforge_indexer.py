@@ -378,22 +378,95 @@ def load_with_docling(filepath: Path) -> list[Document]:
 
 
 def _load_with_pypdf(filepath: Path) -> list[Document]:
-    """Legacy fallback: PyPDFLoader with improved chunking."""
+    """Improved fallback: PyPDF with paragraph-aware splitting and heading context."""
+    import re as _re
     from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     loader = PyPDFLoader(str(filepath))
-    docs = loader.load()
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=FALLBACK_CHUNK_SIZE,
-        chunk_overlap=FALLBACK_OVERLAP,
-        add_start_index=True,
-    )
-    chunks = splitter.split_documents(docs)
-    for chunk in chunks:
-        chunk.metadata["parser"] = "pypdf_fallback"
-        chunk.metadata["chunk_type"] = "section"
-        chunk.metadata.setdefault("source", filepath.name)
+    raw_docs = loader.load()
+
+    chunks: list[Document] = []
+    current_heading = "Introduction"
+
+    for doc in raw_docs:
+        page_num = doc.metadata.get("page", 0)
+        text = doc.page_content.strip()
+        if not text:
+            continue
+
+        # Split into paragraphs (double newline or significant whitespace)
+        paragraphs = _re.split(r"\n{2,}", text)
+        current_block = ""
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+
+            # Detect headings: short lines, often all-caps or title-case
+            is_heading = (
+                len(para) < 120
+                and not para.endswith(".")
+                and (
+                    para.isupper()
+                    or para.istitle()
+                    or _re.match(r"^\d+[\.\)]\s+", para)
+                    or _re.match(r"^(Abstract|Introduction|Conclusion|References|Appendix|Discussion|Results|Methodology|Background)", para, _re.IGNORECASE)
+                )
+            )
+
+            if is_heading:
+                # Flush current block before heading change
+                if current_block.strip():
+                    chunks.append(Document(
+                        page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
+                        metadata={
+                            "source": filepath.name,
+                            "chunk_type": "section",
+                            "section": current_heading,
+                            "page": page_num,
+                            "sub_index": len(chunks),
+                            "parser": "pypdf_semantic",
+                        },
+                    ))
+                    current_block = ""
+                current_heading = para[:120]
+                continue
+
+            # Accumulate paragraphs; flush when approaching max size
+            if len(current_block) + len(para) > 1200 and current_block:
+                chunks.append(Document(
+                    page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
+                    metadata={
+                        "source": filepath.name,
+                        "chunk_type": "section",
+                        "section": current_heading,
+                        "page": page_num,
+                        "sub_index": len(chunks),
+                        "parser": "pypdf_semantic",
+                    },
+                ))
+                # Keep last 200 chars as overlap for continuity
+                current_block = current_block[-200:] + "\n\n" + para + "\n\n"
+            else:
+                current_block += para + "\n\n"
+
+        # Flush remaining content from this page
+        if current_block.strip():
+            chunks.append(Document(
+                page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
+                metadata={
+                    "source": filepath.name,
+                    "chunk_type": "section",
+                    "section": current_heading,
+                    "page": page_num,
+                    "sub_index": len(chunks),
+                    "parser": "pypdf_semantic",
+                },
+            ))
+            current_block = ""
+
+    logger.info("PyPDF semantic chunker: %d chunks from '%s'", len(chunks), filepath.name)
     return chunks
 
 

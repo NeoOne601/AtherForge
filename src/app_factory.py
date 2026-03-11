@@ -1,9 +1,28 @@
 from __future__ import annotations
 import asyncio
+import os
 import time
 import structlog
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+
+# ── 0. Load Environment BEFORE ML Imports ───────────────────────
+# This ensures that HF_HOME and other cache variables from .env
+# are injected into os.environ before huggingface_hub initializes.
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── 0b. Apply user-saved settings.json overrides ────────────────
+# These take priority over .env defaults for paths like HF_HOME.
+import json as _json
+_settings_file = os.path.join("data", "settings.json")
+if os.path.exists(_settings_file):
+    try:
+        with open(_settings_file) as _f:
+            for _k, _v in _json.load(_f).items():
+                os.environ[_k] = str(_v)
+    except Exception:
+        pass  # Non-fatal: fall back to .env defaults
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +38,8 @@ from src.logging_setup import setup_logging
 from src.routers import (
     chat_router, ragforge_router, streamsync_router, 
     watchtower_router, sessions_router, export_router, 
-    guardrails_router, learning_router, sync_router
+    guardrails_router, learning_router, sync_router,
+    settings_router
 )
 
 logger = structlog.get_logger("aetherforge.factory")
@@ -39,6 +59,7 @@ async def _nightly_oplora_job(app: FastAPI, force: bool = False):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     t0 = time.perf_counter()
+    from src.core.container import container
     settings = get_settings()
     
     # ── 1. Initialize Structured Logging ───────────────────────
@@ -47,17 +68,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("AetherForge starting", env=settings.aetherforge_env, port=settings.aetherforge_port)
 
     state = AppState()
-    state.settings = settings
     app.state.app_state = state
 
-    # ── 2. Initialize Components ───────────────────────────────
-    from src.learning.replay_buffer import ReplayBuffer
-    from src.learning.history_manager import HistoryManager
-    from src.meta_agent import MetaAgent
-    from src.guardrails.silicon_colosseum import SiliconColosseum
-    from src.modules.session_store import SessionStore
-    from src.modules.export_engine import ExportEngine
+    # ── 2. Initialize Core Services via Container ────────────────
+    await container.initialize_all(state)
 
+    # ── 3. Background Utility Tasks ─────────────────────────────
     # Location (Background)
     async def _fetch_location():
         try:
@@ -73,28 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     safe_create_task(_fetch_location(), name="fetch_location")
 
-    state.replay_buffer = ReplayBuffer(settings)
-    await state.replay_buffer.initialize()
-    state.history_manager = HistoryManager(settings)
-
-    # ChromaDB + MiniLM
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
-    state.vector_store = Chroma(persist_directory=str(settings.chroma_path), embedding_function=embeddings)
-
-    from src.modules.ragforge.sparse_index import SparseIndex
-    state.sparse_index = SparseIndex(db_path=settings.data_dir / "sparse_index.db")
-
-    state.session_store = SessionStore(db_path=settings.data_dir / "sessions.db", key_file=settings.sqlcipher_key_file)
-    state.export_engine = ExportEngine(state.session_store)
-
-    state.colosseum = SiliconColosseum(settings)
-    await state.colosseum.initialize()
-
-    # ── Sync Integration ───────────────────────────────────────────
+    # ── 4. Sync Integration ───────────────────────────────────────────
     from src.modules.sync.event_log import EventLog
     from src.modules.sync.sync_manager import SyncManager
     import uuid
@@ -110,10 +105,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     state.sync_manager = SyncManager(node_id=node_id, port=settings.aetherforge_port, event_log=sync_event_log)
     await state.sync_manager.start()
 
-    state.meta_agent = MetaAgent(settings, state.colosseum, vector_store=state.vector_store, replay_buffer=state.replay_buffer)
-    await state.meta_agent.initialize()
-
-    # ── 3. StreamSync & WatchTower Background Tasks ─────────────
+    # ── 5. Module Background Tasks ──────────────────────────────
     from src.modules.streamsync.rss_feeder import rss_poller_task
     from src.modules.streamsync.directory_watcher import StreamSyncDirectoryWatcher
     
@@ -152,7 +144,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if state.sync_manager:
         await state.sync_manager.stop()
     state.scheduler.shutdown(wait=False)
-    await state.replay_buffer.flush()
+    await container.shutdown_all()
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AetherForge", lifespan=lifespan)
@@ -175,6 +167,14 @@ def create_app() -> FastAPI:
     app.include_router(guardrails_router)
     app.include_router(learning_router)
     app.include_router(sync_router)
+    app.include_router(settings_router)
+
+    # Mount generated files directory for charts and reports
+    from fastapi.staticfiles import StaticFiles
+    from pathlib import Path
+    generated_dir = Path(os.environ.get("DATA_DIR", "data")) / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/api/v1/generated", StaticFiles(directory=str(generated_dir)), name="generated")
 
     # ── Observability Middleware ───────────────────────────
     import uuid

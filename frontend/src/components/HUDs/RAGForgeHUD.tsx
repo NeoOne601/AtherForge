@@ -15,7 +15,12 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
     useEffect(() => {
         fetch("/api/v1/ragforge/vlm-options")
             .then(res => res.json())
-            .then(data => setVlmOptions(data.options || []))
+            .then(data => {
+                setVlmOptions(data.options || []);
+                if (data.selected) {
+                    setSelectedVlm(data.selected);
+                }
+            })
             .catch(err => console.error("Failed to fetch VLM options", err));
     }, []);
 

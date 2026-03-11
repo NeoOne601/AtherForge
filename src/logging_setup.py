@@ -2,6 +2,8 @@ import logging
 import asyncio
 import structlog
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Optional
 
 # Global queue for UI log streaming
@@ -66,7 +68,7 @@ def setup_logging(env: str = "development"):
         cache_logger_on_first_use=True,
     )
 
-    # Standard logging bridge
+    # Standard logging bridge — console handler
     handler = logging.StreamHandler(sys.stdout)
     
     if env == "production":
@@ -86,6 +88,21 @@ def setup_logging(env: str = "development"):
         
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+
+    # ── File handler for data/logs/backend.log ──────────────
+    log_dir = Path("data/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "backend.log",
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.dev.ConsoleRenderer(colors=False),
+    )
+    file_handler.setFormatter(file_formatter)
+    root.addHandler(file_handler)
 
     # Add our custom queue handler for the UI
     queue_handler = LogQueueHandler()

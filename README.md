@@ -1,4 +1,4 @@
-# AetherForge v1.0
+# AetherForge v1.1
 ## The Sovereign AI Operating System: Local, Perpetual, Glass-Box.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -16,9 +16,10 @@ By unifying high-performance 1.58-bit ternary inference with a closed-loop perpe
 
 ### Key Value Propositions
 *   **100% Local Privacy**: Zero-telemetry design. Your data never leaves your silicon.
-*   **Perpetual Evolution**: Integrated Replay Buffer and OPLoRA nightly fine-tuning loop ensures the system grows smarter with every session without forgetting core competencies.
+*   **Perpetual Evolution & Prompt Optimization**: Integrated Replay Buffer and OPLoRA nightly fine-tuning loop ensures the system grows smarter. The `SelfOptGenome` autonomously mutates system prompts and reasoning parameters to self-improve via hill-climbing evolution.
+*   **Transparent Reasoning (Thinking UI)**: AetherForge natively exposes internal AI Chain-of-Thought (CoT) processes via a parsable `<think>` UI block, allowing users to verify the logical deduction before trusting the final answer.
 *   **Deterministic Governance**: Every tool call is gated by the "Silicon Colosseum"—a hybrid OPA (Open Policy Agent) and FSM (Finite State Machine) guardrail system.
-*   **Causal Observability**: Real-time X-Ray mode visualizes LangGraph decision chains and causal graphs, turning "Black-Box" AI into an auditable operation.
+*   **Causal Observability**: Real-time HUDs (TuneLab, Trace HUD) visualize LangGraph decision chains and training statuses, demystifying the internal cognition network for both technical and non-technical users.
 
 ---
 
@@ -32,39 +33,46 @@ graph TD
         BE --> Supervisor[Meta-Agent Supervisor]
         Supervisor --> RAG[RAGForge: Semantic Retrieval]
         Supervisor --> Sync[SyncManager: Multi-Node P2P]
-        Supervisor --> RCA[RCA Agent: Root Cause Analysis]
-        Supervisor --> Insights[InsightForge: Novelty Detection]
+        Supervisor --> Tools[ToolRegistry: Local Data Analysis & Sensors]
     end
     
     subgraph "Trust & Safety (Silicon Colosseum)"
-        RAG & Sync & RCA & Insights --> OPA[OPA Policy Engine]
+        RAG & Sync & Tools --> OPA[OPA Policy Engine]
         OPA --> FSM[FSM State Enforcement]
-        FSM --> SAMR[SAMR-lite: Faithfulness Scoring]
+        FSM --> SAMR[SAMR-lite: Semantic Faithfulness]
     end
     
-    subgraph "Learning & Inference (OPLoRA)"
-        RB[Replay Buffer: Parquet/Fernet] --> Train[OPLoRA Nightly Training]
-        Inference[BitNet 1.58-bit: Metal/MPS]
+    subgraph "Learning & Evolution"
+        SAMR --> RB[Replay Buffer: Parquet/Fernet]
+        RB --> Train[OPLoRA Auto-Tuning]
+        RB --> Evolve[AetherResearcher Prompt Evolution]
+        Train & Evolve --> Inference[BitNet 1.58-bit: Metal/MPS]
     end
-    
-    SAMR --> Inference
 ```
 
 ---
 
 ## 🚀 Key Unique Capabilities
 
-### 1. OPLoRA (Orthogonal Projection LoRA)
-AetherForge utilizes a proprietary SVD-based projection mechanism to prevent catastrophic forgetting. By decomposing LoRA weight deltas and projecting new updates onto the orthogonal complement of the preserved knowledge subspace, we achieve continuous learning without the need for expensive replay-data distillation.
+### 1. OPLoRA & Autonomous Prompt Evolution
+AetherForge utilizes a proprietary SVD-based projection mechanism to prevent catastrophic forgetting. By projecting new updates onto the orthogonal complement of the preserved knowledge subspace, we achieve continuous learning. Furthermore, an integrated autonomous researcher tests new structural prompts against a benchmark dataset, retaining only the `SelfOptGenome` configurations that measurably reduce hallucinations.
 
-### 2. Silicon Colosseum & SAMR-lite
-We replace "vibe-based" safety with deterministic policy enforcement.
-- **OPA Integration**: Real-time Rego policy evaluation for every tool invocation.
-- **FSM Guardrails**: Enforces valid agentic state transitions.
-- **SAMR-lite**: A lightweight, locally-calculated Semantic Alignment & Model Reliability scorer that blocks hallucinations before they reach the user.
+### 2. Deep Context & Transparent Reasoning
+Gone are the days of blind LLM outputs. The integrated RAG pipeline performs intelligent sentence-boundary PyPDF chunking and injects verifiable context. The `meta_agent` structures outputs into explicit `<think>` and answer blocks, seamlessly parsed by the React UI so users can audit the thought process. 
 
-### 3. BitNet 1.58-bit Core
+### 3. Silicon Colosseum & SAMR-lite
+We replace "vibe-based" safety with deterministic, mathematical policy enforcement.
+- **SAMR-lite (Faithfulness Benchmarking)**: A lightweight, locally-calculated Semantic Alignment scorer that computes Cosine Similarity between generated answers and retrieved source chunks. Answers dropping below the 0.55 threshold trigger warnings or get blocked to prevent hallucinations entirely.
+- **OPA/FSM Guards**: Real-time Rego policy evaluation bounds the capabilities of Python execution environments, file generation tools, and live API access.
+
+### 4. BitNet 1.58-bit Core
 Native support for ternary quantized models ({-1, 0, +1}). This architecture replaces complex floating-point multiplications with simple integer additions, enabling 80+ tokens/sec on base M1 silicon while reducing the memory footprint by 70%.
+
+### 5. TuneLab & Cognitive HUDs
+AetherForge features **TuneLab**, a real-time visualization layer that demystifies the continuous learning loop for non-technical users. It translates complex machine learning metrics into intuitive concepts:
+- **Matrix Capacity**: Monitors the AI's short-term learning memory.
+- **Replay Buffer**: Displays successful interactions saved for permanent study.
+- **Live Status Feed**: Shows the autonomous brain's internal parameter adjustments and training timelines in real-time.
 
 ---
 
@@ -80,11 +88,10 @@ AtherForge/
 │   ├── learning/       # OPLoRA, Replay Buffer, & Evolution Engine
 │   └── modules/        # Domain-specific Agentic Graphs
 ├── Test_related/       # Consolidated Validation Suite
-│   ├── tests/          # Pytest units & integration suites
-│   └── scripts/        # Benchmarking & evaluation utilities
-├── frontend/           # High-Fidelity React HUD
+├── frontend/           # High-Fidelity React HUD (TuneLab, Settings, Chat)
 ├── data/               # Local Persistent Store (Encrypted)
 │   ├── logs/           # Centralized Traceability Logs
+│   ├── generated/      # Safely Generated Analytical Files (Charts/CSV)
 │   └── chroma/         # Vector Embeddings Cache
 ├── models/             # GGUF/BitNet Weights
 └── runtime/            # Multi-platform build & run scripts
@@ -114,7 +121,7 @@ npm run tauri:dev
 ## ⚖️ Governance & Security
 
 *   **Encryption**: Session data via SQLCipher (AES-256); Replay Buffers via Age/Fernet.
-*   **Network Isolation**: Local-only by default (`127.0.0.1`). DuckDuckGo search and Location services are opt-in.
+*   **Network Isolation**: Local-only by default (`127.0.0.1`). File system scopes are strictly bounded to `data/generated/`.
 *   **Auditability**: Every agent decision generates a JSON-LD compliant causal trace.
 
 ---

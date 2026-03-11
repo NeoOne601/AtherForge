@@ -74,14 +74,14 @@ export function TuneLabHUD() {
             <div style={{ display: "flex", gap: "24px", alignItems: "center", marginBottom: "24px" }}>
                 <div style={{ flex: 1 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
-                        <span style={{ color: "var(--text-muted)" }}>Matrix Capacity Remaining</span>
+                        <span style={{ color: "var(--text-muted)" }} title="The AI's short-term learning memory. Training clears this space.">Matrix Capacity Remaining ℹ️</span>
                         <span style={{ color: "var(--volt-light)", fontWeight: 600 }}>{capacityPct.toFixed(1)}%</span>
                     </div>
                     <div className="novelty-bar-bg"><div className="novelty-bar" style={{ width: `${capacityPct}%` }} /></div>
                 </div>
                 <div style={{ flex: 1 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
-                        <span style={{ color: "var(--text-muted)" }}>Replay Buffer Size (Need &gt;10 high-quality)</span>
+                        <span style={{ color: "var(--text-muted)" }} title="Smart, successful answers saved to be studied and learned permanently.">Replay Buffer Size ℹ️</span>
                         <span style={{ color: "var(--aether-light)", fontWeight: 600 }}>{replaySize.toLocaleString()} items</span>
                     </div>
                     <div className="novelty-bar-bg"><div className="novelty-bar" style={{ width: `${Math.min(100, (replaySize / 10) * 100)}%`, background: "var(--aether)" }} /></div>
@@ -89,8 +89,11 @@ export function TuneLabHUD() {
             </div>
 
             {/* ── Training Metrics Timeline ─────────────────────── */}
-            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "12px" }}>
+            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "4px" }}>
                 📊 Training Metrics Timeline
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                Tracks the AI's learning progress. "Loss" going down means the AI is getting smarter and making fewer mistakes.
             </div>
             {trainingHistory.length > 0 ? (
                 <div style={{ background: "rgba(0,0,0,0.2)", borderRadius: "12px", padding: "16px", marginBottom: "24px", border: "1px solid var(--border)" }}>
@@ -117,8 +120,11 @@ export function TuneLabHUD() {
             )}
 
             {/* ── Real-time Status Feed ─────────────────────────── */}
-            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "12px" }}>
+            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "4px" }}>
                 📡 Live Training Status
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                Watch the AI's internal brain making active parameter adjustments.
             </div>
             <div style={{ background: "rgba(20,20,30,0.4)", borderRadius: "8px", padding: "12px", marginBottom: "24px", border: "1px solid rgba(255,255,255,0.05)", maxHeight: "150px", overflowY: "auto" }}>
                 {statusEvents.length === 0 ? (
@@ -134,8 +140,11 @@ export function TuneLabHUD() {
                 )}
             </div>
 
-            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "12px" }}>
+            <div className="hud-title" style={{ fontSize: "14px", borderTop: "1px solid var(--border)", paddingTop: "16px", marginBottom: "4px" }}>
                 📖 Pending Knowledge Feed
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                A scratchpad of recent good chats. Highly rated answers will be permanently learned in the next cycle.
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px", overflowY: "auto", maxHeight: "400px", paddingRight: "8px" }}>
                 {pendingItems.length === 0 ? (

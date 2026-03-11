@@ -62,7 +62,16 @@ class AetherForgeSettings(BaseSettings):
     # 0.55–0.75 vs source chunks — 0.45 catches truly ungrounded responses only.
     # RAGForge module bypasses hard-blocking; SAMR-lite appends visible warnings instead.
     silicon_colosseum_min_faithfulness: float = Field(default=0.45, ge=0.0, le=1.0)
+ 
+    # ── Vision Language Models (VLM) ──────────────────────────────
+    # Apple Silicon Optimized VLM (mlx-vlm)
+    # Default path on external drive as requested by user.
+    apple_vlm_model_path: Path = Path("/Volumes/Apple/AI Model")
 
+    # ── Web Grounding / Search ────────────────────────────────────
+    web_search_provider: Literal["ddg", "searxng"] = Field(default="ddg")
+    searxng_url: str = Field(default="http://localhost:8080")
+ 
     # ── Storage ───────────────────────────────────────────────────
     data_dir: Path = Path("./data")
     replay_buffer_path: Path = Path("./data/replay_buffer.parquet")

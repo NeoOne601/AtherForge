@@ -229,7 +229,6 @@ class ReplayBuffer:
             table,
             root_path=str(self._root_path),
             partition_cols=['module'],
-            use_legacy_dataset=False,
             existing_data_behavior='overwrite_or_ignore'
         )
 
@@ -267,7 +266,7 @@ class ReplayBuffer:
             return []
 
         try:
-            dataset = pq.ParquetDataset(str(self._root_path), use_legacy_dataset=False)
+            dataset = pq.ParquetDataset(str(self._root_path))
             table = dataset.read()
             
             # Filters
@@ -309,7 +308,7 @@ class ReplayBuffer:
             try:
                 # Use dataset to read all partitions
                 import pyarrow.parquet as pq
-                dataset = pq.ParquetDataset(str(self._root_path), use_legacy_dataset=False)
+                dataset = pq.ParquetDataset(str(self._root_path))
                 table = dataset.read()
                 
                 total_records = len(table)

@@ -134,7 +134,7 @@ class CognitiveRAG:
 
         # ── Stage 4: Evidence Scoring ────────────────────────────
         scored_docs = self._score_evidence(query, all_docs)
-        top_docs = scored_docs[:8]  # keep top 8 after scoring
+        top_docs = scored_docs[:5]  # keep top 5 after scoring (reduced from 8 to prevent context overload)
         trace.evidence_chunks = len(top_docs)
         logger.info("CognitiveRAG ④ Top %d evidence chunks scored", len(top_docs))
 
@@ -359,14 +359,127 @@ class CognitiveRAG:
             # If parsing fails, return original order
             return docs
 
-    # ─────────────────────────────────────────────────────────────
-    # STAGE 5: Chain-of-Thought Synthesis
-    # ─────────────────────────────────────────────────────────────
+    _RAG_PROMPT_VARIANTS = {
+        "v1": (
+            "You are RAGForge CognitiveRAG — a precise document intelligence "
+            "assistant that THINKS before answering.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Answer EXCLUSIVELY from the Evidence below. NEVER use your prior knowledge or training data.\n"
+            "2. If the EXACT answer or supporting facts cannot be found in the Evidence, you MUST output precisely: 'The provided documents do not contain this information.' Do not attempt to guess or hallucinate.\n"
+            "3. For specific facts, cite as [1], [2], etc.\n"
+            "4. NEVER guess or embellish.\n\n"
+            "FORMATTING RULES (strictly follow):\n"
+            "- Use **bold** for key terms and section titles.\n"
+            "- Use bullet points (- ) for lists of items.\n"
+            "- Use numbered lists (1. 2. 3.) for steps or ranked items.\n"
+            "- Use a blank line between paragraphs.\n"
+            "- Keep responses concise: 1-3 sentences for FACTUAL, structured sections for SYNTHESIS.\n"
+            "- DO NOT produce one long run-on paragraph.\n"
+            "- For visual elements (figures, tables, charts): describe in structured bullet points covering "
+            "  title, axes/headers, key data points, and main takeaway.\n\n"
+            "{cot_instruction}\n\n"
+            "Evidence:\n{evidence_text}"
+        ),
+        "v2": (
+            "You are RAGForge, an uncompromisingly analytical AI.\n\n"
+            "MANDATORY INSTRUCTIONS:\n"
+            "Failure to follow these instructions will result in system error.\n"
+            "1. Base your answer strictly on the provided 'Evidence'.\n"
+            "2. Under no circumstance should you rely on pre-trained knowledge outside the provided Evidence.\n"
+            "3. Make liberal use of inline citations (like [1]) directly pointing to the source.\n"
+            "4. If there is insufficient data, simply state: 'I cannot answer this based on the current document.'\n\n"
+            "OUTPUT SHIELDING:\n"
+            "Your objective is high faithfulness. Prefer quoting relevant parts of the text.\n\n"
+            "{cot_instruction}\n\n"
+            "Evidence Blocks:\n{evidence_text}"
+        )
+    }
 
-    def _chain_of_thought(
+    def think_and_answer(
         self,
         query: str,
-        docs: list[Document],
+        source_filter: str | list[str] | None = None,
+        max_retries: int = 1,
+        prompt_variant: str = "v1",
+    ) -> tuple[str, list[Document], ThinkingTrace]:
+        """
+        Execute the full CognitiveRAG pipeline.
+
+        Returns:
+            (answer_text, evidence_docs, thinking_trace)
+        """
+        t0 = time.perf_counter()
+        trace = ThinkingTrace()
+
+        # ── Stage 1: Query Understanding ─────────────────────────
+        trace.query_type = self._classify_query(query)
+        logger.info("CognitiveRAG ① QueryType: %s for '%s...'",
+                    trace.query_type, query[:40])
+
+        # ── Stage 2: HyDE / Query Decomposition ──────────────────
+        sub_queries = [query]
+        if trace.query_type == "VAGUE" and self.embed:
+            sub_queries.append(self._hyde_generate(query))
+            trace.hyde_hypothesis = sub_queries[-1]
+            logger.info("CognitiveRAG ② HyDE hyp: %s...", trace.hyde_hypothesis[:40])
+        elif trace.query_type in ("COMPARATIVE", "SYNTHESIS"):
+            decomposed = self._decompose_query(query)
+            if decomposed:
+                sub_queries.extend(decomposed)
+                trace.sub_questions = decomposed
+                logger.info("CognitiveRAG ② Decomposed into %d sub-queries", len(decomposed))
+
+        # ── Stage 3: Multi-path Hybrid Search ────────────────────
+        all_candidate_docs: list[Document] = []
+        for sq in set(sub_queries):
+            docs = self.search(
+                query=sq,
+                filter_source=source_filter,
+                k=6,
+                semantic_ratio=0.7
+            )
+            all_candidate_docs.extend(docs)
+        logger.info("CognitiveRAG ③ Retrieved %d total candidate chunks", len(all_candidate_docs))
+
+        # ── Stage 4: Evidence Scoring & Deduplication ────────────
+        scored_evidence = self._score_evidence(query, all_candidate_docs)
+        if not scored_evidence:
+            trace.latency_ms = (time.perf_counter() - t0) * 1000
+            error_msg = ("I could not find any relevant information in the provided "
+                         "documents to answer your question.")
+            return error_msg, [], trace
+
+        trace.evidence_chunks = len(scored_evidence)
+        logger.info("CognitiveRAG ④ Filtered down to %d high-quality chunks", trace.evidence_chunks)
+
+        # ── Stage 5: Chain-of-Thought Generation ─────────────────
+        evidence_parts = []
+        for i, doc in enumerate(scored_evidence):
+            meta = doc.metadata
+            source = meta.get("source", "Unknown")
+            page = meta.get("page", "?")
+            section = meta.get("section", "")
+            citation = f"[{i+1}] {source} | p.{page}"
+            if section:
+                citation += f" | §{section[:60]}"
+            evidence_parts.append(f"{citation}\n{doc.page_content}")
+
+        evidence_text = "\n\n".join(evidence_parts)
+
+        # Adapt the CoT prompt based on query type
+        cot_instruction = self._get_cot_instruction(trace.query_type)
+        
+        # Load the selected prompt variant
+        prompt_template = self._RAG_PROMPT_VARIANTS.get(prompt_variant, self._RAG_PROMPT_VARIANTS["v1"])
+        filled_prompt = prompt_template.format(
+            cot_instruction=cot_instruction,
+            evidence_text=evidence_text
+        )
+
+        messages = [
+            SystemMessage(content=filled_prompt),
+            HumanMessage(content=query),
+        ]        docs: list[Document],
         trace: ThinkingTrace,
     ) -> tuple[str, str]:
         """
@@ -420,8 +533,8 @@ class CognitiveRAG:
         reasoning = ""
         answer = result.strip()
         
-        # Try to extract the <reasoning> block
-        reasoning_match = re.search(r'<reasoning>(.*?)</reasoning>', result, re.DOTALL | re.IGNORECASE)
+        # Try to extract the <think> block
+        reasoning_match = re.search(r'<think>(.*?)</think>', result, re.DOTALL | re.IGNORECASE)
         if reasoning_match:
             reasoning = reasoning_match.group(1).strip()
             
@@ -431,8 +544,8 @@ class CognitiveRAG:
             answer = answer_match.group(1).strip()
         elif reasoning_match:
             # If there was a reasoning block but no strict <answer> block, 
-            # assume everything after </reasoning> is the final answer
-            parts = re.split(r'</reasoning>', result, flags=re.IGNORECASE)
+            # assume everything after </think> is the final answer
+            parts = re.split(r'</think>', result, flags=re.IGNORECASE)
             if len(parts) > 1:
                 answer = parts[-1].strip()
 
@@ -445,37 +558,41 @@ class CognitiveRAG:
         """Return query-type-specific chain-of-thought + formatting instructions."""
         instructions = {
             "FACTUAL": (
-                "Think step by step in <reasoning> tags:\n"
+                "CRITICAL: You MUST begin your response with <think>.\n"
+                "Think step by step inside <think> and </think> tags:\n"
                 "STEP 1: Identify which evidence chunk(s) contain the answer.\n"
                 "STEP 2: Extract the exact relevant information.\n"
                 "STEP 3: State the answer concisely with citation(s).\n"
-                "Format your final answer in <answer> tags as:\n"
+                "Then format your final answer inside <answer> and </answer> tags as:\n"
                 "  - 1-3 sentences maximum for simple facts\n"
                 "  - Bullet points if listing multiple items\n"
                 "  - Bold the key finding\n"
             ),
             "COMPARATIVE": (
-                "Think step by step in <reasoning> tags:\n"
+                "CRITICAL: You MUST begin your response with <think>.\n"
+                "Think step by step inside <think> and </think> tags:\n"
                 "STEP 1: Identify evidence about each item being compared.\n"
                 "STEP 2: List the key similarities and differences found in the evidence.\n"
                 "STEP 3: Synthesize a clear comparison.\n"
-                "Format your final answer in <answer> tags with:\n"
+                "Then format your final answer inside <answer> and </answer> tags with:\n"
                 "  **Similarities:** (bullet list)\n"
                 "  **Differences:** (bullet list)\n"
                 "  **Summary:** (1-2 sentences)\n"
             ),
             "SYNTHESIS": (
-                "Think step by step in <reasoning> tags:\n"
+                "CRITICAL: You MUST begin your response with <think>.\n"
+                "Think step by step inside <think> and </think> tags:\n"
                 "STEP 1: Identify the main themes across all evidence chunks.\n"
                 "STEP 2: Group related evidence together.\n"
                 "STEP 3: Build a structured summary, citing each source.\n"
-                "Format your final answer in <answer> tags with markdown headers, e.g.:\n"
+                "Then format your final answer inside <answer> and </answer> tags with markdown headers, e.g.:\n"
                 "  **Overview** (2-3 sentences)\n"
                 "  **Key Findings** (numbered list)\n"
                 "  **Conclusion** (1-2 sentences)\n"
             ),
             "VAGUE": (
-                "Think step by step in <reasoning> tags:\n"
+                "CRITICAL: You MUST begin your response with <think>.\n"
+                "Think step by step inside <think> and </think> tags:\n"
                 "STEP 1: Interpret what the user is most likely asking about.\n"
                 "STEP 2: Find the most relevant evidence for that interpretation.\n"
                 "STEP 3: Provide a helpful, formatted answer with citations.\n"
