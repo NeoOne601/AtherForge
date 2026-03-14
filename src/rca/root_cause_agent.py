@@ -9,10 +9,11 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+import structlog
 
 logger = structlog.get_logger("aetherforge.rca")
 
@@ -20,9 +21,12 @@ logger = structlog.get_logger("aetherforge.rca")
 @dataclass
 class RCAResult:
     """Structured RCA output with causal chain and remediation plan."""
+
     issue: str
     root_causes: list[str] = field(default_factory=list)
-    causal_chain: list[dict[str, str]] = field(default_factory=list)  # [{"why": "...", "because": "..."}]
+    causal_chain: list[dict[str, str]] = field(
+        default_factory=list
+    )  # [{"why": "...", "because": "..."}]
     evidence: list[str] = field(default_factory=list)
     remediation_steps: list[str] = field(default_factory=list)
     confidence: float = 0.0
@@ -87,19 +91,23 @@ class RootCauseAgent:
             evidence.append(f"Depth {depth + 1}: {because}")
 
             # Stop if LLM indicates root cause found
-            if any(marker in because.lower() for marker in [
-                "root cause", "fundamental", "primary cause", "no further", "base cause"
-            ]):
+            if any(
+                marker in because.lower()
+                for marker in [
+                    "root cause",
+                    "fundamental",
+                    "primary cause",
+                    "no further",
+                    "base cause",
+                ]
+            ):
                 logger.info("RCA chain terminated at depth %d", depth + 1)
                 break
 
             current_issue = because
 
         # ── Extract root causes (last 1-2 chain entries) ──────────
-        root_causes = [
-            chain_item["because"]
-            for chain_item in causal_chain[-2:]
-        ]
+        root_causes = [chain_item["because"] for chain_item in causal_chain[-2:]]
 
         # ── Generate remediation plan ─────────────────────────────
         remediation = self._generate_remediation(issue, root_causes, ctx)
@@ -109,8 +117,12 @@ class RootCauseAgent:
         confidence = min(0.95, 0.6 + 0.05 * len(causal_chain) + 0.05 * len(anoms))
 
         duration_ms = (time.perf_counter() - t0) * 1000
-        logger.info("RCA complete: depth=%d root_causes=%d duration=%.1fms",
-                    len(causal_chain), len(root_causes), duration_ms)
+        logger.info(
+            "RCA complete: depth=%d root_causes=%d duration=%.1fms",
+            len(causal_chain),
+            len(root_causes),
+            duration_ms,
+        )
 
         return RCAResult(
             issue=issue,
@@ -160,7 +172,11 @@ class RootCauseAgent:
             if line.strip() and len(line.strip()) > 5
         ][:5]
         if not steps:
-            steps = ["Investigate root causes further", "Review system logs", "Monitor affected metrics"]
+            steps = [
+                "Investigate root causes further",
+                "Review system logs",
+                "Monitor affected metrics",
+            ]
         return steps
 
     def _ask_llm(self, prompt: str) -> str:

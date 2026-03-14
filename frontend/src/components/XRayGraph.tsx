@@ -53,6 +53,7 @@ const nodeTypes = { xray: XRayNode };
 
 export default function XRayGraph({ graph, onClose }: Props): JSX.Element {
     const [selected, setSelected] = useState<CausalNode | null>(null);
+    const [currentStep, setCurrentStep] = useState<number | null>(null);
 
     const { nodes, edges } = useMemo((): { nodes: Node[]; edges: Edge[] } => {
         if (!graph) return { nodes: [], edges: [] };
@@ -76,12 +77,23 @@ export default function XRayGraph({ graph, onClose }: Props): JSX.Element {
             id: `e-${i}`,
             source: e.source,
             target: e.target,
+            label: e.label,
+            labelStyle: { fill: "rgba(139,92,246,0.8)", fontSize: 10, fontWeight: 500 },
+            labelBgPadding: [4, 2],
+            labelBgBorderRadius: 4,
+            labelBgStyle: { fill: "rgba(2,4,8,0.8)" },
             animated: true,
             style: { stroke: "rgba(139,92,246,0.6)", strokeWidth: 1.5 },
         }));
 
-        return { nodes: rfNodes, edges: rfEdges };
-    }, [graph]);
+        const filteredNodes = currentStep === null ? rfNodes : rfNodes.slice(0, currentStep + 1);
+        const filteredEdges = currentStep === null ? rfEdges : rfEdges.filter(e => {
+            const targetIdx = graph.nodes.findIndex(n => n.id === e.target);
+            return targetIdx <= currentStep;
+        });
+
+        return { nodes: filteredNodes, edges: filteredEdges };
+    }, [graph, currentStep]);
 
     const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
         const found = graph?.nodes.find(n => n.id === node.id) || null;
@@ -125,6 +137,41 @@ export default function XRayGraph({ graph, onClose }: Props): JSX.Element {
                     </div>
                 )}
             </div>
+
+            {/* Timeline Scrubber */}
+            {graph && graph.nodes.length > 0 && (
+                <div className="flex items-center gap-4 px-4 py-2 border-t" style={{ background: "rgba(55,55,55,0.05)", borderColor: "var(--border-subtle)" }}>
+                    <div className="flex items-center gap-2">
+                        <button 
+                            onClick={() => setCurrentStep(prev => prev === null ? graph.nodes.length - 1 : Math.max(0, prev - 1))}
+                            className="p-1 rounded hover:bg-white/10 text-xs"
+                        >
+                            ← Prev
+                        </button>
+                        <button 
+                            onClick={() => setCurrentStep(null)}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-tighter ${currentStep === null ? 'bg-plasma text-white' : 'bg-white/10 text-muted'}`}
+                        >
+                            LIVE
+                        </button>
+                        <button 
+                            onClick={() => setCurrentStep(prev => prev === null ? graph.nodes.length - 1 : Math.min(graph.nodes.length - 1, prev + 1))}
+                            className="p-1 rounded hover:bg-white/10 text-xs"
+                        >
+                            Next →
+                        </button>
+                    </div>
+                    <div className="flex-1 h-1 bg-white/5 rounded-full relative overflow-hidden">
+                        <div 
+                            className="absolute top-0 left-0 h-full bg-plasma transition-all duration-300" 
+                            style={{ width: `${((currentStep === null ? graph.nodes.length - 1 : currentStep) / (graph.nodes.length - 1)) * 100}%` }}
+                        />
+                    </div>
+                    <span className="text-[10px] text-muted font-mono">
+                        Step {currentStep === null ? graph.nodes.length : currentStep + 1} of {graph.nodes.length}
+                    </span>
+                </div>
+            )}
 
             {/* Selected node detail */}
             {selected && (

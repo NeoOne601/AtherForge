@@ -7,14 +7,15 @@
 # ─────────────────────────────────────────────────────────────────
 
 import json
-import structlog
 import time
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+
+import structlog
 
 from src.config import AetherForgeSettings
 
 logger = structlog.get_logger("aetherforge.rag_history")
+
 
 class RAGHistoryManager:
     """
@@ -41,25 +42,28 @@ class RAGHistoryManager:
                 "latency_ms": trace.latency_ms,
                 "evidence_chunks": trace.evidence_chunks,
                 "verification_passed": trace.verification_passed,
-                "retrieval_rounds": trace.retrieval_rounds
+                "retrieval_rounds": trace.retrieval_rounds,
             }
-            
+
             with open(self._history_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
-                
-            logger.info("Recorded RAG trace: score=%.1f latency=%.0fms", 
-                        trace.grounding_score, trace.latency_ms)
+
+            logger.info(
+                "Recorded RAG trace: score=%.1f latency=%.0fms",
+                trace.grounding_score,
+                trace.latency_ms,
+            )
         except Exception as e:
             logger.error("Failed to record RAG history: %s", e)
 
-    def get_recent_metrics(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_recent_metrics(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return the most recent RAG performance entries."""
         if not self._history_file.exists():
             return []
-            
+
         results = []
         try:
-            with open(self._history_file, "r") as f:
+            with open(self._history_file) as f:
                 for line in f:
                     results.append(json.loads(line))
             return results[-limit:]

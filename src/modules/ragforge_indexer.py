@@ -20,13 +20,13 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
+import gc
 import uuid
 from pathlib import Path
 from typing import Any
 
-import gc
 import psutil
+import structlog
 from langchain_core.documents import Document
 
 logger = structlog.get_logger("aetherforge.ragforge_indexer")
@@ -50,25 +50,31 @@ def _check_memory_budget(label: str = "VLM", is_ollama: bool = False) -> bool:
     if mem.percent >= ceiling:
         logger.warning(
             "⚠️  Memory Governor: %.1f%% used (ceiling: %.0f%%) — deferring %s",
-            mem.percent, ceiling, label,
+            mem.percent,
+            ceiling,
+            label,
         )
         return False
-    logger.info("Memory Governor: %.1f%% used — %s approved (ceiling: %.0f%%)", mem.percent, label, ceiling)
+    logger.info(
+        "Memory Governor: %.1f%% used — %s approved (ceiling: %.0f%%)", mem.percent, label, ceiling
+    )
     return True
+
 
 # ── Chunk size limits ─────────────────────────────────────────────
 # all-MiniLM-L6-v2 supports 512 tokens. At ~3.5 chars/token, that's ~1800 chars.
 # We keep chunks well below that so embeddings are focused and not truncated.
-MAX_SECTION_CHARS = 1500   # one section / heading block
-MAX_TABLE_CHARS = 1200     # one complete table
-MAX_EQUATION_CHARS = 800   # one equation block
+MAX_SECTION_CHARS = 1500  # one section / heading block
+MAX_TABLE_CHARS = 1200  # one complete table
+MAX_EQUATION_CHARS = 800  # one equation block
 FALLBACK_CHUNK_SIZE = 1000  # plain text fallback
-FALLBACK_OVERLAP = 100      # overlap between chunks
+FALLBACK_OVERLAP = 100  # overlap between chunks
 
 
 # ─────────────────────────────────────────────────────────────────
 # Phase 1: Smart Loading
 # ─────────────────────────────────────────────────────────────────
+
 
 def _analyze_pdf(filepath: Path) -> dict:
     """
@@ -84,6 +90,7 @@ def _analyze_pdf(filepath: Path) -> dict:
     """
     try:
         import fitz  # PyMuPDF
+
         doc = fitz.open(str(filepath))
 
         num_pages = max(len(doc), 1)
@@ -109,13 +116,22 @@ def _analyze_pdf(filepath: Path) -> dict:
         }
         logger.info(
             "PDF analysis '%s': scanned=%s, images=%d on %d/%d pages",
-            filepath.name, result["is_scanned"], total_images,
-            len(image_pages), num_pages,
+            filepath.name,
+            result["is_scanned"],
+            total_images,
+            len(image_pages),
+            num_pages,
         )
         return result
     except Exception as e:
         logger.warning("PDF analysis failed: %s", e)
-        return {"is_scanned": False, "has_images": False, "image_pages": [], "total_pages": 0, "total_images": 0}
+        return {
+            "is_scanned": False,
+            "has_images": False,
+            "image_pages": [],
+            "total_pages": 0,
+            "total_images": 0,
+        }
     finally:
         gc.collect()  # Ensure fitz handle is released quickly
 
@@ -164,6 +180,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
                     try:
                         if hasattr(item, "export_to_markdown"):
                             import inspect
+
                             sig = inspect.signature(item.export_to_markdown)
                             if "doc" in sig.parameters:
                                 caption_text = item.export_to_markdown(doc).strip()
@@ -190,6 +207,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 try:
                     # Tables and other rich items may need the doc reference
                     import inspect
+
                     sig = inspect.signature(item.export_to_markdown)
                     if "doc" in sig.parameters:
                         item_text = item.export_to_markdown(doc).strip()
@@ -235,18 +253,20 @@ def load_with_docling(filepath: Path) -> list[Document]:
                     prov = item.prov[0] if isinstance(item.prov, list) else item.prov
                     page_num = getattr(prov, "page_no", 0)
 
-                chunks.append(Document(
-                    page_content=text,
-                    metadata={
-                        "source": filepath.name,
-                        "chunk_type": chunk_type,
-                        "section": current_section,
-                        "page": page_num,
-                        "sub_index": i,
-                        "doc_label": item_label,
-                        "parser": "docling",
-                    }
-                ))
+                chunks.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": filepath.name,
+                            "chunk_type": chunk_type,
+                            "section": current_section,
+                            "page": page_num,
+                            "sub_index": i,
+                            "doc_label": item_label,
+                            "parser": "docling",
+                        },
+                    )
+                )
 
         logger.info("Docling extracted %d semantic chunks from '%s'", len(chunks), filepath.name)
 
@@ -266,26 +286,32 @@ def load_with_docling(filepath: Path) -> list[Document]:
 
             # Track figure captions
             if chunk.metadata.get("chunk_type") == "figure_caption":
-                fig_match = _re.search(r'(?:Figure|Fig\.?)\s*(\d+)', text, _re.IGNORECASE)
+                fig_match = _re.search(r"(?:Figure|Fig\.?)\s*(\d+)", text, _re.IGNORECASE)
                 if fig_match:
                     fig_num = fig_match.group(1)
-                    figure_registry.setdefault(fig_num, {"caption": "", "references": [], "pages": set()})
+                    figure_registry.setdefault(
+                        fig_num, {"caption": "", "references": [], "pages": set()}
+                    )
                     figure_registry[fig_num]["caption"] = text
                     figure_registry[fig_num]["pages"].add(page)
 
             # Track table content
             if chunk.metadata.get("chunk_type") == "table":
-                tab_match = _re.search(r'Table\s*(\d+)', text, _re.IGNORECASE)
+                tab_match = _re.search(r"Table\s*(\d+)", text, _re.IGNORECASE)
                 if tab_match:
                     tab_num = tab_match.group(1)
-                    table_registry.setdefault(tab_num, {"content": "", "references": [], "pages": set()})
+                    table_registry.setdefault(
+                        tab_num, {"content": "", "references": [], "pages": set()}
+                    )
                     table_registry[tab_num]["content"] = text[:500]  # cap table text
                     table_registry[tab_num]["pages"].add(page)
 
             # Find in-text references to figures
-            for fig_ref in _re.finditer(r'(?:Figure|Fig\.?)\s*(\d+)', text, _re.IGNORECASE):
+            for fig_ref in _re.finditer(r"(?:Figure|Fig\.?)\s*(\d+)", text, _re.IGNORECASE):
                 fig_num = fig_ref.group(1)
-                figure_registry.setdefault(fig_num, {"caption": "", "references": [], "pages": set()})
+                figure_registry.setdefault(
+                    fig_num, {"caption": "", "references": [], "pages": set()}
+                )
                 # Store the sentence containing the reference
                 start = max(0, fig_ref.start() - 100)
                 end = min(len(text), fig_ref.end() + 200)
@@ -295,9 +321,11 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 figure_registry[fig_num]["pages"].add(page)
 
             # Find in-text references to tables
-            for tab_ref in _re.finditer(r'Table\s*(\d+)', text, _re.IGNORECASE):
+            for tab_ref in _re.finditer(r"Table\s*(\d+)", text, _re.IGNORECASE):
                 tab_num = tab_ref.group(1)
-                table_registry.setdefault(tab_num, {"content": "", "references": [], "pages": set()})
+                table_registry.setdefault(
+                    tab_num, {"content": "", "references": [], "pages": set()}
+                )
                 start = max(0, tab_ref.start() - 100)
                 end = min(len(text), tab_ref.end() + 200)
                 context_sentence = text[start:end].strip()
@@ -318,19 +346,21 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 parts.append(f"Pages: {', '.join(str(p) for p in sorted(info['pages']))}")
 
             fig_text = "\n".join(parts)
-            chunks.append(Document(
-                page_content=fig_text,
-                metadata={
-                    "source": filepath.name,
-                    "chunk_type": "figure_context",
-                    "section": f"Figure {fig_num}",
-                    "page": min(info["pages"]) if info["pages"] else 0,
-                    "sub_index": 0,
-                    "doc_label": "figure_context",
-                    "parser": "docling",
-                    "figure_number": fig_num,
-                },
-            ))
+            chunks.append(
+                Document(
+                    page_content=fig_text,
+                    metadata={
+                        "source": filepath.name,
+                        "chunk_type": "figure_context",
+                        "section": f"Figure {fig_num}",
+                        "page": min(info["pages"]) if info["pages"] else 0,
+                        "sub_index": 0,
+                        "doc_label": "figure_context",
+                        "parser": "docling",
+                        "figure_number": fig_num,
+                    },
+                )
+            )
 
         # Create enriched table context chunks
         for tab_num, info in table_registry.items():
@@ -343,25 +373,30 @@ def load_with_docling(filepath: Path) -> list[Document]:
                     parts.append(f"  - {ref}")
 
             tab_text = "\n".join(parts)
-            chunks.append(Document(
-                page_content=tab_text,
-                metadata={
-                    "source": filepath.name,
-                    "chunk_type": "table_context",
-                    "section": f"Table {tab_num}",
-                    "page": min(info["pages"]) if info["pages"] else 0,
-                    "sub_index": 0,
-                    "doc_label": "table_context",
-                    "parser": "docling",
-                    "table_number": tab_num,
-                },
-            ))
+            chunks.append(
+                Document(
+                    page_content=tab_text,
+                    metadata={
+                        "source": filepath.name,
+                        "chunk_type": "table_context",
+                        "section": f"Table {tab_num}",
+                        "page": min(info["pages"]) if info["pages"] else 0,
+                        "sub_index": 0,
+                        "doc_label": "table_context",
+                        "parser": "docling",
+                        "table_number": tab_num,
+                    },
+                )
+            )
 
         fig_count = len(figure_registry)
         tab_count = len(table_registry)
         if fig_count or tab_count:
-            logger.info("Figure/table registry: %d figures, %d tables extracted from text",
-                       fig_count, tab_count)
+            logger.info(
+                "Figure/table registry: %d figures, %d tables extracted from text",
+                fig_count,
+                tab_count,
+            )
 
         return chunks
 
@@ -375,11 +410,10 @@ def load_with_docling(filepath: Path) -> list[Document]:
         gc.collect()
 
 
-
-
 def _load_with_pypdf(filepath: Path) -> list[Document]:
     """Improved fallback: PyPDF with paragraph-aware splitting and heading context."""
     import re as _re
+
     from langchain_community.document_loaders import PyPDFLoader
 
     loader = PyPDFLoader(str(filepath))
@@ -411,14 +445,38 @@ def _load_with_pypdf(filepath: Path) -> list[Document]:
                     para.isupper()
                     or para.istitle()
                     or _re.match(r"^\d+[\.\)]\s+", para)
-                    or _re.match(r"^(Abstract|Introduction|Conclusion|References|Appendix|Discussion|Results|Methodology|Background)", para, _re.IGNORECASE)
+                    or _re.match(
+                        r"^(Abstract|Introduction|Conclusion|References|Appendix|Discussion|Results|Methodology|Background)",
+                        para,
+                        _re.IGNORECASE,
+                    )
                 )
             )
 
             if is_heading:
                 # Flush current block before heading change
                 if current_block.strip():
-                    chunks.append(Document(
+                    chunks.append(
+                        Document(
+                            page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
+                            metadata={
+                                "source": filepath.name,
+                                "chunk_type": "section",
+                                "section": current_heading,
+                                "page": page_num,
+                                "sub_index": len(chunks),
+                                "parser": "pypdf_semantic",
+                            },
+                        )
+                    )
+                    current_block = ""
+                current_heading = para[:120]
+                continue
+
+            # Accumulate paragraphs; flush when approaching max size
+            if len(current_block) + len(para) > 1200 and current_block:
+                chunks.append(
+                    Document(
                         page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
                         metadata={
                             "source": filepath.name,
@@ -428,14 +486,17 @@ def _load_with_pypdf(filepath: Path) -> list[Document]:
                             "sub_index": len(chunks),
                             "parser": "pypdf_semantic",
                         },
-                    ))
-                    current_block = ""
-                current_heading = para[:120]
-                continue
+                    )
+                )
+                # Keep last 200 chars as overlap for continuity
+                current_block = current_block[-200:] + "\n\n" + para + "\n\n"
+            else:
+                current_block += para + "\n\n"
 
-            # Accumulate paragraphs; flush when approaching max size
-            if len(current_block) + len(para) > 1200 and current_block:
-                chunks.append(Document(
+        # Flush remaining content from this page
+        if current_block.strip():
+            chunks.append(
+                Document(
                     page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
                     metadata={
                         "source": filepath.name,
@@ -445,25 +506,8 @@ def _load_with_pypdf(filepath: Path) -> list[Document]:
                         "sub_index": len(chunks),
                         "parser": "pypdf_semantic",
                     },
-                ))
-                # Keep last 200 chars as overlap for continuity
-                current_block = current_block[-200:] + "\n\n" + para + "\n\n"
-            else:
-                current_block += para + "\n\n"
-
-        # Flush remaining content from this page
-        if current_block.strip():
-            chunks.append(Document(
-                page_content=f"[Section: {current_heading}]\n\n{current_block.strip()}",
-                metadata={
-                    "source": filepath.name,
-                    "chunk_type": "section",
-                    "section": current_heading,
-                    "page": page_num,
-                    "sub_index": len(chunks),
-                    "parser": "pypdf_semantic",
-                },
-            ))
+                )
+            )
             current_block = ""
 
     logger.info("PyPDF semantic chunker: %d chunks from '%s'", len(chunks), filepath.name)
@@ -497,6 +541,7 @@ def _split_large_block(text: str, max_chars: int) -> list[str]:
 # Phase 1 Router: detect format and dispatch to right loader
 # ─────────────────────────────────────────────────────────────────
 
+
 def load_document(filepath: Path) -> list[Document]:
     """
     Smart document router:
@@ -516,6 +561,7 @@ def load_document(filepath: Path) -> list[Document]:
                     logger.info("'%s' is scanned — full VLM processing needed", filepath.name)
                     # Return all pages as image_pages for async VLM processing
                     import fitz
+
                     pdf_doc = fitz.open(str(filepath))
                     all_pages = list(range(len(pdf_doc)))
                     pdf_doc.close()
@@ -533,13 +579,15 @@ def load_document(filepath: Path) -> list[Document]:
                 logger.info(
                     "Hybrid mode: Docling extracted %d text chunks, "
                     "%d image pages queued for async VLM processing",
-                    len(chunks), len(image_pages),
+                    len(chunks),
+                    len(image_pages),
                 )
 
             return chunks, image_pages
 
         elif ext == ".csv":
             from langchain_community.document_loaders import CSVLoader
+
             loader = CSVLoader(str(filepath))
             docs = loader.load()
             for doc in docs:
@@ -551,6 +599,7 @@ def load_document(filepath: Path) -> list[Document]:
         elif ext in (".txt", ".md"):
             from langchain_community.document_loaders import TextLoader
             from langchain_text_splitters import RecursiveCharacterTextSplitter
+
             loader = TextLoader(str(filepath), encoding="utf-8")
             docs = loader.load()
             splitter = RecursiveCharacterTextSplitter(
@@ -568,6 +617,7 @@ def load_document(filepath: Path) -> list[Document]:
         else:
             logger.warning("Unsupported extension '%s' — trying TextLoader", ext)
             from langchain_community.document_loaders import TextLoader
+
             loader = TextLoader(str(filepath), encoding="utf-8", autodetect_encoding=True)
             docs = loader.load()
             for doc in docs:
@@ -584,6 +634,7 @@ def load_document(filepath: Path) -> list[Document]:
 # ─────────────────────────────────────────────────────────────────
 # Phase 2 + 3: Index into ChromaDB
 # ─────────────────────────────────────────────────────────────────
+
 
 def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) -> dict[str, Any]:
     """
@@ -604,7 +655,11 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
         existing = vector_store.get(where={"source": source_name})
         if existing and existing.get("ids"):
             vector_store.delete(ids=existing["ids"])
-            logger.info("Dedup: removed %d existing ChromaDB chunks for '%s'", len(existing["ids"]), source_name)
+            logger.info(
+                "Dedup: removed %d existing ChromaDB chunks for '%s'",
+                len(existing["ids"]),
+                source_name,
+            )
     except Exception as dedup_err:
         logger.warning("ChromaDB dedup failed (non-fatal): %s", dedup_err)
 
@@ -622,13 +677,17 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
         chunks, image_pages = result
     else:
         chunks, image_pages = result, []
-        
+
     if not chunks:
-        logger.warning("No text chunks extracted from '%s' (may need VLM for scanned PDF)", filepath.name)
+        logger.warning(
+            "No text chunks extracted from '%s' (may need VLM for scanned PDF)", filepath.name
+        )
         if image_pages:
             return {
-                "file": filepath.name, "chunks_added": 0,
-                "image_pages": image_pages, "parser": "pending_vlm",
+                "file": filepath.name,
+                "chunks_added": 0,
+                "image_pages": image_pages,
+                "parser": "pending_vlm",
                 "chunk_breakdown": {},
             }
         return {"file": filepath.name, "chunks_added": 0, "error": "extraction_failed"}
@@ -654,6 +713,7 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
             logger.info("FTS5 sparse index updated via shared singleton (%d chunks)", len(chunks))
         else:
             from src.modules.ragforge.sparse_index import SparseIndex
+
             sparse_idx = SparseIndex(db_path=filepath.parent.parent / "sparse_index.db")
             sparse_idx.add_documents(chunks)
             sparse_idx.close()
@@ -670,7 +730,10 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
     parser = chunks[0].metadata.get("parser", "unknown") if chunks else "unknown"
     logger.info(
         "Indexed '%s' — %d chunks via %s | breakdown: %s",
-        filepath.name, len(chunks), parser, type_counts
+        filepath.name,
+        len(chunks),
+        parser,
+        type_counts,
     )
 
     return {

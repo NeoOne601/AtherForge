@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import structlog
 import subprocess
 import tempfile
 import time
@@ -33,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import structlog
 
 from src.config import AetherForgeSettings
 
@@ -40,12 +40,14 @@ logger = structlog.get_logger("aetherforge.silicon_colosseum")
 
 # ── Policy Decision Result ─────────────────────────────────────────
 
+
 @dataclass
 class PolicyDecision:
     """
     The result of a Silicon Colosseum evaluation.
     Immutable after construction — safe to pass around and serialize.
     """
+
     allowed: bool
     reason: str
     deny_reasons: list[str] = field(default_factory=list)
@@ -66,6 +68,7 @@ class PolicyDecision:
 
 # ── FSM State Definitions ─────────────────────────────────────────
 
+
 class AgentFSMState(Enum):
     """
     Finite State Machine states for a single agent session.
@@ -75,20 +78,25 @@ class AgentFSMState(Enum):
       PROCESSING → RESPONDING → IDLE
       Any → ERROR → IDLE (recovery)
     """
-    IDLE = auto()          # Waiting for next user input
-    PROCESSING = auto()    # LLM generating, no tool calls yet
+
+    IDLE = auto()  # Waiting for next user input
+    PROCESSING = auto()  # LLM generating, no tool calls yet
     TOOL_CALLING = auto()  # Executing a tool call (under budget)
-    RESPONDING = auto()    # Finalizing and sending response
-    ERROR = auto()         # Error state — resets to IDLE on next turn
+    RESPONDING = auto()  # Finalizing and sending response
+    ERROR = auto()  # Error state — resets to IDLE on next turn
 
 
 # Valid FSM transitions
 _FSM_TRANSITIONS: dict[AgentFSMState, set[AgentFSMState]] = {
-    AgentFSMState.IDLE:         {AgentFSMState.PROCESSING},
-    AgentFSMState.PROCESSING:   {AgentFSMState.TOOL_CALLING, AgentFSMState.RESPONDING, AgentFSMState.ERROR},
+    AgentFSMState.IDLE: {AgentFSMState.PROCESSING},
+    AgentFSMState.PROCESSING: {
+        AgentFSMState.TOOL_CALLING,
+        AgentFSMState.RESPONDING,
+        AgentFSMState.ERROR,
+    },
     AgentFSMState.TOOL_CALLING: {AgentFSMState.PROCESSING, AgentFSMState.ERROR},
-    AgentFSMState.RESPONDING:   {AgentFSMState.IDLE, AgentFSMState.ERROR},
-    AgentFSMState.ERROR:        {AgentFSMState.IDLE},
+    AgentFSMState.RESPONDING: {AgentFSMState.IDLE, AgentFSMState.ERROR},
+    AgentFSMState.ERROR: {AgentFSMState.IDLE},
 }
 
 
@@ -97,6 +105,7 @@ class AgentFSM:
     Per-session FSM. One instance per session_id.
     Enforces legal state transitions and tracks tool call count.
     """
+
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self.state = AgentFSMState.IDLE
@@ -117,7 +126,9 @@ class AgentFSM:
             logger.warning("[FSM] %s | session=%s", reason, self.session_id)
             return False, reason
 
-        logger.debug("[FSM] %s -> %s | session=%s", self.state.name, new_state.name, self.session_id)
+        logger.debug(
+            "[FSM] %s -> %s | session=%s", self.state.name, new_state.name, self.session_id
+        )
         self.state = new_state
         return True, "ok"
 
@@ -132,6 +143,7 @@ class AgentFSM:
 
 
 # ── Silicon Colosseum ─────────────────────────────────────────────
+
 
 class SiliconColosseum:
     """
@@ -166,21 +178,24 @@ class SiliconColosseum:
             self._policy_source = self._policy_path.read_text()
             logger.info("Loaded OPA policy from %s", self._policy_path)
         else:
-            logger.warning("Policy file not found: %s — using default inline policy", self._policy_path)
+            logger.warning(
+                "Policy file not found: %s — using default inline policy", self._policy_path
+            )
             self._policy_source = _DEFAULT_INLINE_POLICY
 
         # Check OPA binary availability (embedded mode)
         if self.settings.opa_mode == "embedded":
             try:
-                result = subprocess.run(
-                    ["opa", "version"], capture_output=True, timeout=5
-                )
+                result = subprocess.run(["opa", "version"], capture_output=True, timeout=5)
                 self._opa_available = result.returncode == 0
                 if self._opa_available:
                     # Write policy to a persistent file to avoid temp file I/O overhead on every request
                     self._policy_file = self.settings.data_dir / "opa_policy.rego"
                     self._policy_file.write_text(self._policy_source, encoding="utf-8")
-                    logger.info("OPA binary available: embedded mode active (policy at %s)", self._policy_file)
+                    logger.info(
+                        "OPA binary available: embedded mode active (policy at %s)",
+                        self._policy_file,
+                    )
                 else:
                     logger.warning("OPA binary found but failed — falling back to Python evaluator")
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -188,7 +203,9 @@ class SiliconColosseum:
                 self._opa_available = False
         else:
             # Server mode — create persistent HTTP client
-            self._http_client = httpx.AsyncClient(base_url=self.settings.opa_server_url, timeout=5.0)
+            self._http_client = httpx.AsyncClient(
+                base_url=self.settings.opa_server_url, timeout=5.0
+            )
             logger.info("OPA server mode: %s", self.settings.opa_server_url)
 
     def _get_or_create_fsm(self, session_id: str) -> AgentFSM:
@@ -257,9 +274,12 @@ class SiliconColosseum:
             input_json = json.dumps({"input": input_data})
             result = subprocess.run(
                 [
-                    "opa", "eval",
-                    "--format", "json",
-                    "--data", str(self._policy_file),
+                    "opa",
+                    "eval",
+                    "--format",
+                    "json",
+                    "--data",
+                    str(self._policy_file),
                     "--stdin-input",
                     "data.aetherforge.guardrails",
                 ],
@@ -302,7 +322,10 @@ class SiliconColosseum:
             deny_reasons.append(f"Tool call budget exceeded: {tool_count} > {max_calls}")
 
         # Rule 2: Faithfulness threshold
-        if faithfulness is not None and faithfulness < self.settings.silicon_colosseum_min_faithfulness:
+        if (
+            faithfulness is not None
+            and faithfulness < self.settings.silicon_colosseum_min_faithfulness
+        ):
             deny_reasons.append(
                 f"Output faithfulness {faithfulness:.2f} < "
                 f"{self.settings.silicon_colosseum_min_faithfulness:.2f} threshold"
@@ -310,15 +333,29 @@ class SiliconColosseum:
 
         # Rule 3: Prohibited patterns
         PROHIBITED = [
-            "rm -rf", "DELETE FROM", "DROP TABLE", "sudo",
-            "__import__", "eval(", "exec(", "os.system", "subprocess.call",
+            "rm -rf",
+            "DELETE FROM",
+            "DROP TABLE",
+            "sudo",
+            "__import__",
+            "eval(",
+            "exec(",
+            "os.system",
+            "subprocess.call",
         ]
         for pattern in PROHIBITED:
             if pattern in message:
                 deny_reasons.append(f"Prohibited pattern: '{pattern}'")
 
         # Rule 4: Module allowlist
-        VALID_MODULES = {"ragforge", "localbuddy", "watchtower", "streamsync", "tunelab", "output_filter"}
+        VALID_MODULES = {
+            "ragforge",
+            "localbuddy",
+            "watchtower",
+            "streamsync",
+            "tunelab",
+            "output_filter",
+        }
         if module and module not in VALID_MODULES:
             deny_reasons.append(f"Unknown module: '{module}'")
 
@@ -359,7 +396,9 @@ class SiliconColosseum:
             )
         except Exception as exc:
             logger.exception("OPA server eval failed: %s", exc)
-            return PolicyDecision(allowed=True, reason="OPA server error — fallback allow", deny_reasons=[])
+            return PolicyDecision(
+                allowed=True, reason="OPA server error — fallback allow", deny_reasons=[]
+            )
 
     async def get_policy_source(self) -> str:
         """Return current policy source for the PolicyEditor UI."""
@@ -378,8 +417,7 @@ class SiliconColosseum:
                     f.write(new_policy)
                     tmp = f.name
                 result = subprocess.run(
-                    ["opa", "check", tmp],
-                    capture_output=True, text=True, timeout=10
+                    ["opa", "check", tmp], capture_output=True, text=True, timeout=10
                 )
                 Path(tmp).unlink(missing_ok=True)
                 if result.returncode != 0:

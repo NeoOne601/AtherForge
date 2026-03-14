@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 import json
-import structlog
 import time
-from pathlib import Path
 from typing import Any
+
+import structlog
 
 from src.config import AetherForgeSettings
 
 logger = structlog.get_logger("aetherforge.history_manager")
+
 
 class HistoryManager:
     """
@@ -39,18 +40,20 @@ class HistoryManager:
                 entry = dict(result)
 
             entry["timestamp"] = time.time()
-            
+
             history = self.get_history()
             history.append(entry)
-            
+
             # Keep only last 100 runs to prevent file bloat
             if len(history) > 100:
                 history = history[-100:]
 
             with open(self._history_file, "w") as f:
                 json.dump(history, f, indent=2)
-                
-            logger.info("Recorded training result to history: loss=%.4f", entry.get("avg_loss", 0.0))
+
+            logger.info(
+                "Recorded training result to history: loss=%.4f", entry.get("avg_loss", 0.0)
+            )
         except Exception as e:
             logger.error("Failed to record training history: %s", e)
 
@@ -59,7 +62,7 @@ class HistoryManager:
         if not self._history_file.exists():
             return []
         try:
-            with open(self._history_file, "r") as f:
+            with open(self._history_file) as f:
                 return json.load(f)
         except Exception as e:
             logger.error("Failed to read training history: %s", e)

@@ -22,15 +22,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import structlog
-import os
-import secrets
 import time
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+
+import structlog
 
 try:
     import pyarrow as pa
@@ -51,18 +47,20 @@ logger = structlog.get_logger("aetherforge.replay_buffer")
 # ── Parquet schema ────────────────────────────────────────────────
 # Explicit schema ensures consistent types across all writes.
 if pa:
-    _SCHEMA = pa.schema([
-        pa.field("id", pa.string()),
-        pa.field("session_id", pa.string()),
-        pa.field("module", pa.string()),
-        pa.field("prompt", pa.binary()),   # Encrypted
-        pa.field("response", pa.binary()), # Encrypted
-        pa.field("faithfulness_score", pa.float32()),
-        pa.field("tool_calls_json", pa.string()),
-        pa.field("timestamp_utc", pa.float64()),
-        pa.field("is_used_for_training", pa.bool_()),
-        pa.field("novelty_score", pa.float32()),
-    ])
+    _SCHEMA = pa.schema(
+        [
+            pa.field("id", pa.string()),
+            pa.field("session_id", pa.string()),
+            pa.field("module", pa.string()),
+            pa.field("prompt", pa.binary()),  # Encrypted
+            pa.field("response", pa.binary()),  # Encrypted
+            pa.field("faithfulness_score", pa.float32()),
+            pa.field("tool_calls_json", pa.string()),
+            pa.field("timestamp_utc", pa.float64()),
+            pa.field("is_used_for_training", pa.bool_()),
+            pa.field("novelty_score", pa.float32()),
+        ]
+    )
 else:
     _SCHEMA = None
 
@@ -83,7 +81,7 @@ class ReplayBuffer:
         self.settings = settings
         # Partitioned dataset directory
         self._root_path = settings.data_dir / "replay_dataset"
-        self._path = self._root_path # For backward compatibility in logs
+        self._path = self._root_path  # For backward compatibility in logs
         self._key_file = settings.sqlcipher_key_file
         self._fernet: Fernet | None = None
         self._write_lock = asyncio.Lock()
@@ -98,12 +96,12 @@ class ReplayBuffer:
             self._fernet = await asyncio.get_event_loop().run_in_executor(
                 None, self._load_or_create_key
             )
-        
+
         self._root_path.mkdir(parents=True, exist_ok=True)
         if not pa or not pq:
             logger.warning("pyarrow not installed - skipping replay buffer initialization")
             return
-        
+
         # Check if dataset is empty or has data
         if not any(self._root_path.iterdir()):
             logger.info("Created new replay buffer dataset directory at %s", self._root_path)
@@ -122,7 +120,7 @@ class ReplayBuffer:
         """
         if not Fernet:
             return None
-            
+
         key_file = self._key_file
         key_file.parent.mkdir(parents=True, exist_ok=True)
         if key_file.exists():
@@ -167,8 +165,8 @@ class ReplayBuffer:
             "id": record_id,
             "session_id": session_id,
             "module": module,
-            "prompt": prompt[:4096],        # Truncate long prompts
-            "response": response[:8192],    # Truncate long responses
+            "prompt": prompt[:4096],  # Truncate long prompts
+            "response": response[:8192],  # Truncate long responses
             "faithfulness_score": float(faithfulness_score or 0.0),
             "tool_calls_json": json.dumps(tool_calls or []),
             "timestamp_utc": time.time(),
@@ -198,9 +196,7 @@ class ReplayBuffer:
         self._pending.clear()
 
         # Run Parquet I/O in thread executor (blocking)
-        await asyncio.get_event_loop().run_in_executor(
-            None, self._append_to_parquet, records
-        )
+        await asyncio.get_event_loop().run_in_executor(None, self._append_to_parquet, records)
         logger.debug("Flushed %d records to replay buffer", len(records))
 
     def _append_to_parquet(self, records: list[dict[str, Any]]) -> None:
@@ -223,13 +219,13 @@ class ReplayBuffer:
             encrypted_records.append(enc_r)
 
         table = pa.Table.from_pylist(encrypted_records, schema=_SCHEMA)
-        
+
         # Write to partitioned dataset (module-based folders)
         pq.write_to_dataset(
             table,
             root_path=str(self._root_path),
-            partition_cols=['module'],
-            existing_data_behavior='overwrite_or_ignore'
+            partition_cols=["module"],
+            existing_data_behavior="overwrite_or_ignore",
         )
 
     async def sample(
@@ -259,8 +255,8 @@ class ReplayBuffer:
         min_faithfulness: float = 0.0,
         exclude_used: bool = False,
     ) -> list[dict[str, Any]]:
-        import pyarrow.parquet as pq
         import pyarrow.compute as pc
+        import pyarrow.parquet as pq
 
         if not self._root_path.exists() or not any(self._root_path.iterdir()):
             return []
@@ -268,20 +264,20 @@ class ReplayBuffer:
         try:
             dataset = pq.ParquetDataset(str(self._root_path))
             table = dataset.read()
-            
+
             # Filters
             mask = pc.field("faithfulness_score") >= min_faithfulness
             if module:
                 mask = pc.and_(mask, pc.field("module") == module)
             if exclude_used:
-                mask = pc.and_(mask, pc.field("is_used_for_training") == False)
-                
+                mask = pc.and_(mask, pc.field("is_used_for_training") == pc.scalar(False))
+
             filtered_table = table.filter(mask)
-            
+
             # Sample (or take last N)
             rows = filtered_table.to_pylist()
             sampled = rows[-n:] if len(rows) > n else rows
-            
+
             # Decrypt
             for r in sampled:
                 if self._fernet:
@@ -294,7 +290,7 @@ class ReplayBuffer:
                 else:
                     r["prompt"] = r["prompt"].decode()
                     r["response"] = r["response"].decode()
-            
+
             return sampled
         except Exception as e:
             logger.error("Failed to read sample from replay buffer: %s", e)
@@ -302,30 +298,33 @@ class ReplayBuffer:
 
     async def get_stats(self) -> dict[str, Any]:
         """Return buffer statistics for the TuneLab dashboard."""
+
         def _stats() -> dict[str, Any]:
             if not self._root_path.exists() or not any(self._root_path.iterdir()):
                 return {"total_records": 0, "size_mb": 0.0, "modules": {}}
             try:
                 # Use dataset to read all partitions
                 import pyarrow.parquet as pq
+
                 dataset = pq.ParquetDataset(str(self._root_path))
                 table = dataset.read()
-                
+
                 total_records = len(table)
                 # Size calculation: sum of all parquet files in the dataset
-                total_size_bytes = sum(f.stat().st_size for f in self._root_path.rglob('*.parquet'))
-                
+                total_size_bytes = sum(f.stat().st_size for f in self._root_path.rglob("*.parquet"))
+
                 # Modules breakdown
                 # Note: 'module' is a transition column in partitioned datasets
                 # but pyarrow handles it correctly in the resulting table.
                 modules_col = table.column("module").to_pylist()
                 from collections import Counter
+
                 modules_stats = dict(Counter(modules_col))
-                
+
                 return {
                     "total_records": total_records,
-                    "size_mb": round(total_size_bytes / (1024 * 1024), 2),
-                    "modules": modules_stats
+                    "size_mb": float(round(total_size_bytes / (1024 * 1024), 2)),
+                    "modules": modules_stats,
                 }
             except Exception as e:
                 logger.error("Failed to get replay buffer stats: %s", e)
@@ -335,14 +334,30 @@ class ReplayBuffer:
 
     async def mark_as_used(self, record_ids: list[str]) -> int:
         """Mark records as used for training. Returns count updated."""
+
         def _mark() -> int:
-            if not self._path.exists():
+            if not self._root_path.exists():
                 return 0
-            table = pq.read_table(self._path)
+            # For partitioned datasets, we read the whole table, modify, and overwrite.
+            # In a production system, we'd use an incremental update or separate metadata DB.
+            dataset = pq.ParquetDataset(str(self._root_path))
+            table = dataset.read()
             df = table.to_pandas()
             mask = df["id"].isin(record_ids)
             df.loc[mask, "is_used_for_training"] = True
-            pq.write_table(pa.Table.from_pandas(df, schema=_SCHEMA), self._path, compression="snappy")
+            
+            # Write back as a new single file in the root for now to simplify marking,
+            # or overwrite the dataset. Overwriting a partitioned dataset is complex.
+            # We'll write to a "marked" partition or simplify the update logic.
+            # Simplified for now: overwrite the whole table back to the partitioned structure.
+            from pyarrow import Table
+            new_table = Table.from_pandas(df, schema=_SCHEMA)
+            pq.write_to_dataset(
+                new_table,
+                root_path=str(self._root_path),
+                partition_cols=["module"],
+                existing_data_behavior="overwrite_or_ignore",
+            )
             return int(mask.sum())
 
         return await asyncio.get_event_loop().run_in_executor(None, _mark)

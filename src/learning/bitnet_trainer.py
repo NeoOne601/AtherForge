@@ -23,17 +23,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import structlog
 import time
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 from src.config import AetherForgeSettings
-from src.learning.oploRA_manager import LoRAWeights, OPLoRAManager
-from src.learning.replay_buffer import ReplayBuffer
 from src.learning.history_manager import HistoryManager
+from src.learning.oplora_manager import LoraWeightUpdate, OPLoRAManager
+from src.learning.replay_buffer import ReplayBuffer
 from src.modules.streamsync.graph import emit_event
 
 logger = structlog.get_logger("aetherforge.bitnet_trainer")
@@ -41,8 +40,10 @@ logger = structlog.get_logger("aetherforge.bitnet_trainer")
 
 # ── Training record ───────────────────────────────────────────────
 
+
 class TrainingResult:
     """Captures the outcome of one nightly OPLoRA cycle."""
+
     def __init__(
         self,
         task_id: str,
@@ -60,13 +61,14 @@ class TrainingResult:
         self.bpb = bpb
         self.duration_seconds = duration_seconds
         self.checkpoint_path = checkpoint_path
-        self.timestamp = datetime.now(tz=timezone.utc).isoformat()
+        self.timestamp = datetime.now(tz=UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__
 
 
 # ── BitNet Trainer ────────────────────────────────────────────────
+
 
 class BitNetTrainer:
     """
@@ -97,24 +99,31 @@ class BitNetTrainer:
         Full nightly OPLoRA cycle. Runs in a background task.
         All heavy operations are dispatched to thread executor.
         """
-        task_id = f"nightly_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        task_id = f"nightly_{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M%S')}"
         logger.info("Starting OPLoRA cycle: task_id=%s", task_id)
         t0 = time.perf_counter()
 
         # ── 1. Sample from replay buffer ──────────────────────────
         emit_event("training_started", payload={"task_id": task_id}, source="TuneLab")
         samples = await self.replay_buffer.sample(
-            n=self.settings.oploра_epochs * 100,  # e.g., 300 samples
+            n=self.settings.oplora_epochs * 100,  # e.g., 300 samples
             min_faithfulness=0.85,
             exclude_used=True,
         )
 
         if len(samples) < 10:
             logger.info("Not enough new samples for training: %d < 10", len(samples))
-            emit_event("training_aborted", payload={"reason": "insufficient_samples", "count": len(samples)}, source="TuneLab")
+            emit_event(
+                "training_aborted",
+                payload={"reason": "insufficient_samples", "count": len(samples)},
+                source="TuneLab",
+            )
             return TrainingResult(
-                task_id=task_id, samples_used=0, layers_projected=0,
-                training_loss=0.0, duration_seconds=0.0,
+                task_id=task_id,
+                samples_used=0,
+                layers_projected=0,
+                training_loss=0.0,
+                duration_seconds=0.0,
                 checkpoint_path="",
             )
 
@@ -125,23 +134,28 @@ class BitNetTrainer:
         self._oplora.load_checkpoints()
 
         # ── 3. Format training data ───────────────────────────────
-        formatted = self._format_samples(samples)
+        from typing import cast
+        samples_list = cast(list[dict[str, Any]], samples)
+        formatted = self._format_samples(samples_list)
 
         # ── 4. Run training in thread executor ───────────────────
-        emit_event("training_running", payload={"epochs": self.settings.oploра_epochs}, source="TuneLab")
+        emit_event(
+            "training_running", payload={"epochs": self.settings.oplora_epochs}, source="TuneLab"
+        )
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, self._train_sync, task_id, formatted
             )
         except Exception as e:
-             emit_event("training_failed", payload={"error": str(e)}, source="TuneLab")
-             raise
+            emit_event("training_failed", payload={"error": str(e)}, source="TuneLab")
+            raise
 
         # ── 5. Mark samples as used ───────────────────────────────
-        sample_ids = [s["id"] for s in samples]
+        sample_ids = [s["id"] for s in cast(list[dict[str, Any]], samples)]
         await self.replay_buffer.mark_as_used(sample_ids)
 
-        duration = time.perf_counter() - t0
+        duration_str = f"{(time.perf_counter() - t0):.2f}"
+        duration = float(duration_str)
         logger.info("OPLoRA cycle complete: task_id=%s duration=%.1fs", task_id, duration)
 
         res = TrainingResult(
@@ -150,14 +164,14 @@ class BitNetTrainer:
             layers_projected=result.get("layers_projected", 0),
             training_loss=result.get("final_loss", 0.0),
             bpb=result.get("bpb", 0.0),
-            duration_seconds=round(duration, 2),
+            duration_seconds=duration,
             checkpoint_path=result.get("checkpoint_path", ""),
         )
-        
+
         # Persist to history
         self._history.record(res)
         emit_event("training_completed", payload=res.to_dict(), source="TuneLab")
-        
+
         return res
 
     def _format_samples(self, samples: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -177,15 +191,17 @@ class BitNetTrainer:
             if response_text.startswith("[Silicon Colosseum]"):
                 continue
 
-            formatted.append({
-                "prompt": (
-                    "<|im_start|>system\n"
-                    "You are AetherForge, a local AI assistant.<|im_end|>\n"
-                    f"<|im_start|>user\n{prompt_text}<|im_end|>\n"
-                    "<|im_start|>assistant\n"
-                ),
-                "completion": response_text + "<|im_end|>",
-            })
+            formatted.append(
+                {
+                    "prompt": (
+                        "<|im_start|>system\n"
+                        "You are AetherForge, a local AI assistant.<|im_end|>\n"
+                        f"<|im_start|>user\n{prompt_text}<|im_end|>\n"
+                        "<|im_start|>assistant\n"
+                    ),
+                    "completion": response_text + "<|im_end|>",
+                }
+            )
         return formatted
 
     def _train_sync(self, task_id: str, samples: list[dict[str, str]]) -> dict[str, Any]:
@@ -203,7 +219,12 @@ class BitNetTrainer:
             return self._mock_train(task_id, samples)
         except Exception as exc:
             logger.exception("Training failed: %s", exc)
-            return {"layers_projected": 0, "final_loss": 0.0, "checkpoint_path": "", "error": str(exc)}
+            return {
+                "layers_projected": 0,
+                "final_loss": 0.0,
+                "checkpoint_path": "",
+                "error": str(exc),
+            }
 
     def _train_with_peft(self, task_id: str, samples: list[dict[str, str]]) -> dict[str, Any]:
         """
@@ -218,21 +239,23 @@ class BitNetTrainer:
           6. Save projected adapter
         """
         import torch
-        from torch.optim import AdamW
-        from torch.utils.data import DataLoader, Dataset
 
         # ── Tokenizer via llama-cpp tokenize (no transformers needed) ──
         # We use a simple character-level approach for the training loop
         # since we're fine-tuning GGUF and don't have HF weights.
         # Production: use transformers AutoTokenizer with the HF weights.
 
-        logger.info("Starting PEFT training: %d samples, %d epochs, r=%d",
-            len(samples), self.settings.oploра_epochs, self.settings.oploра_lora_r)
+        logger.info(
+            "Starting PEFT training: %d samples, %d epochs, r=%d",
+            len(samples),
+            self.settings.oplora_epochs,
+            self.settings.oplora_lora_r,
+        )
 
         # ── Simple synthetic LoRA weight update (demo math) ──────
         # In production, replace with actual gradient-based LoRA updates.
         # The OPLoRA projection math is identical regardless.
-        r = self.settings.oploра_lora_r
+        r = self.settings.oplora_lora_r
         d_out, d_in = 4096, 4096  # Typical transformer hidden dim (adjust per model)
 
         # Simulate learned LoRA weights from training
@@ -243,11 +266,12 @@ class BitNetTrainer:
 
         # ── Apply OPLoRA projection ───────────────────────────────
         import numpy as np
-        lora = LoRAWeights(
+
+        lora = LoraWeightUpdate(
             layer_key="model.layers.0.self_attn.q_proj",
             A=A.numpy(),
             B=B.numpy(),
-            alpha=self.settings.oploра_lora_alpha,
+            alpha=self.settings.oplora_lora_alpha,
         )
         projected_lora = self._oplora.project_new_weights(lora)
 
@@ -256,7 +280,6 @@ class BitNetTrainer:
 
         # ── Save checkpoint ───────────────────────────────────────
         checkpoint_path = self._checkpoint_dir / f"{task_id}_adapter.npz"
-        import numpy as np
         np.savez(
             checkpoint_path,
             task_id=task_id,
@@ -269,22 +292,26 @@ class BitNetTrainer:
         logger.info("Saved OPLoRA checkpoint: %s", checkpoint_path)
         final_loss = 0.05  # Placeholder — real training loop would compute
         bpb = final_loss / 0.6931  # BPB = Loss / ln(2)
-        
+
         return {
             "layers_projected": layers_projected,
             "final_loss": final_loss,
-            "bpb": round(bpb, 4),
+            "bpb": float(f"{bpb:.4f}"),
             "checkpoint_path": str(checkpoint_path),
         }
 
     def _mock_train(self, task_id: str, samples: list[dict[str, str]]) -> dict[str, Any]:
         """Mock training result when training deps are unavailable."""
         checkpoint_path = self._checkpoint_dir / f"{task_id}_mock.json"
-        checkpoint_path.write_text(json.dumps({
-            "task_id": task_id,
-            "samples": len(samples),
-            "note": "Mock training run — install torch+peft for real training",
-        }))
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "samples": len(samples),
+                    "note": "Mock training run — install torch+peft for real training",
+                }
+            )
+        )
         return {
             "layers_projected": 0,
             "final_loss": 0.0,
@@ -293,12 +320,18 @@ class BitNetTrainer:
 
     def list_checkpoints(self) -> list[dict[str, Any]]:
         """List all saved OPLoRA checkpoints."""
-        result = []
-        for f in sorted(self._checkpoint_dir.glob("*.npz")):
-            result.append({
-                "path": str(f),
-                "name": f.stem,
-                "size_kb": round(f.stat().st_size / 1024, 1),
-                "mtime": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat(),
-            })
+        result: list[dict[str, Any]] = []
+        for f_path in sorted(self._checkpoint_dir.glob("*.npz")):
+            from pathlib import Path
+            f = Path(f_path)
+            mtime = f.stat().st_mtime
+            size = f.stat().st_size
+            result.append(
+                {
+                    "path": str(f),
+                    "name": f.stem,
+                    "size_kb": float(f"{size / 1024:.1f}"),
+                    "mtime": datetime.fromtimestamp(mtime, tz=UTC).isoformat(),
+                }
+            )
         return result

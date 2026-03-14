@@ -111,20 +111,22 @@ export default function ChatInterface({ sessionId, activeModule, xrayMode, onNew
                     ws.addEventListener("open", () => resolve(), { once: true });
                 });
             }
-            wsRef.current?.send(JSON.stringify({
-                message: text,
-                module: activeModule,
-                xray_mode: xrayMode,
-            }));
-        } else {
-            // ── REST fallback path ────────────────────────────────────
-            try {
-                const resp = await sendChat({
-                    session_id: sessionId,
-                    module: activeModule,
+                wsRef.current?.send(JSON.stringify({
                     message: text,
+                    module: activeModule,
                     xray_mode: xrayMode,
-                });
+                    protocol: "forensic",
+                }));
+            } else {
+                // ── REST fallback path ────────────────────────────────────
+                try {
+                    const resp = await sendChat({
+                        session_id: sessionId,
+                        module: activeModule,
+                        message: text,
+                        xray_mode: xrayMode,
+                        protocol: "forensic",
+                    });
                 setMessages(prev => prev.map(m =>
                     m.id === assistantId
                         ? {

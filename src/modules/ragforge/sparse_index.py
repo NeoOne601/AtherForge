@@ -16,12 +16,12 @@
 from __future__ import annotations
 
 import json
-import structlog
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
+import structlog
 from langchain_core.documents import Document
 
 logger = structlog.get_logger("aetherforge.ragforge.sparse")
@@ -140,14 +140,17 @@ class SparseIndex:
         try:
             # BM25 scoring with FTS5
             # bm25(chunks_fts) returns negative values; more negative = better match
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT c.chunk_id, c.content, c.metadata, bm25(chunks_fts) AS score
                 FROM chunks_fts
                 JOIN chunks c ON c.rowid = chunks_fts.rowid
                 WHERE chunks_fts MATCH ?
                 ORDER BY score
                 LIMIT ?
-            """, (safe_query, k * 2)).fetchall()  # fetch extra for post-filtering
+            """,
+                (safe_query, k * 2),
+            ).fetchall()  # fetch extra for post-filtering
         except sqlite3.OperationalError as e:
             logger.warning("FTS5 query failed: %s (query: '%s')", e, safe_query[:100])
             return []
@@ -188,7 +191,7 @@ class SparseIndex:
 
     def get_vlm_chunks(self, source: str) -> list[Document]:
         """Return all VLM visual analysis chunks for a given source file.
-        
+
         Used by the tiered VLM preservation logic to determine what tier
         of visual analysis has already been indexed for this document.
         """
@@ -208,9 +211,35 @@ class SparseIndex:
             docs.append(Document(page_content=content, metadata=meta))
         return docs
 
+    def get_chunks_by_source(self, source: str, limit: int | None = None) -> list[Document]:
+        """Return all indexed chunks for a source file in stable reading order."""
+        conn = self._get_conn()
+        query = (
+            "SELECT content, metadata FROM chunks "
+            "WHERE json_extract(metadata, '$.source') = ? "
+            "ORDER BY CAST(COALESCE(json_extract(metadata, '$.page'), 0) AS INTEGER), "
+            "COALESCE(json_extract(metadata, '$.section'), ''), rowid"
+        )
+        params: tuple[Any, ...]
+        if limit is None:
+            params = (source,)
+        else:
+            query += " LIMIT ?"
+            params = (source, limit)
+
+        rows = conn.execute(query, params).fetchall()
+        docs: list[Document] = []
+        for content, meta_str in rows:
+            try:
+                meta = json.loads(meta_str)
+            except Exception:
+                meta = {}
+            docs.append(Document(page_content=content, metadata=meta))
+        return docs
+
     def delete_vlm_chunks(self, source: str) -> int:
         """Delete only VLM visual analysis chunks for a source (preserves text chunks).
-        
+
         Called when a higher-tier VLM is about to replace lower-tier visual analysis.
         Text chunks extracted by Docling are never touched.
         """
@@ -243,8 +272,9 @@ class SparseIndex:
         Removes special operators and wraps tokens for safe matching.
         """
         import re
+
         # Remove FTS5 special characters
-        cleaned = re.sub(r'[^\w\s]', ' ', query)
+        cleaned = re.sub(r"[^\w\s]", " ", query)
         # Split into tokens, remove empty
         tokens = [t.strip() for t in cleaned.split() if t.strip()]
         if not tokens:
@@ -256,6 +286,7 @@ class SparseIndex:
 # ─────────────────────────────────────────────────────────────────
 # Hybrid Search: Dense (ChromaDB) + Sparse (FTS5/BM25) via RRF
 # ─────────────────────────────────────────────────────────────────
+
 
 def hybrid_search(
     query: str,
@@ -312,7 +343,9 @@ def hybrid_search(
     # ── Sparse retrieval (FTS5/BM25) ─────────────────────────────
     try:
         sparse_results = sparse_index.search(
-            query, k=k * 2, source_filter=source_filter,
+            query,
+            k=k * 2,
+            source_filter=source_filter,
         )
         sparse_count = len(sparse_results)
         for rank, (doc, _bm25_score) in enumerate(sparse_results):
@@ -330,7 +363,10 @@ def hybrid_search(
 
     logger.info(
         "Hybrid search: %d final results (dense=%d, sparse=%d, fused=%d)",
-        len(final_docs), dense_count, sparse_count, len(rrf_scores),
+        len(final_docs),
+        dense_count,
+        sparse_count,
+        len(rrf_scores),
     )
     return final_docs
 

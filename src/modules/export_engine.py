@@ -15,14 +15,14 @@
 from __future__ import annotations
 
 import io
-import structlog
 import re
-import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
-    from src.modules.session_store import SessionStore, StoredMessage
+    from src.modules.session_store import SessionStore
 
 logger = structlog.get_logger("aetherforge.export_engine")
 
@@ -94,7 +94,7 @@ class ExportEngine:
         pdf_bytes = engine.session_to_pdf(session_id)
     """
 
-    def __init__(self, session_store: "SessionStore") -> None:
+    def __init__(self, session_store: SessionStore) -> None:
         self.store = session_store
 
     # ─────────────────────────────────────────────────────────────
@@ -110,9 +110,9 @@ class ExportEngine:
 
         lines = [
             f"# {title}",
-            f"",
+            "",
             f"*Exported from AetherForge · {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
-            f"",
+            "",
             "---",
             "",
         ]
@@ -146,7 +146,7 @@ class ExportEngine:
 
         lines = [
             "# AetherForge — Response Export",
-            f"",
+            "",
             f"*Exported · {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
             "",
             "---",
@@ -192,13 +192,15 @@ class ExportEngine:
         """Convert markdown to a styled HTML document."""
         try:
             import markdown as md_lib
+
             body_html = md_lib.markdown(
                 md_text,
                 extensions=["tables", "fenced_code", "nl2br", "sane_lists"],
             )
-            
+
             # Convert file:// images to base64 for WeasyPrint/ReportLab stability
             import base64
+
             def _replace_img_with_base64(match):
                 img_path = match.group(1).replace("file://", "")
                 path = Path(img_path)
@@ -235,6 +237,7 @@ class ExportEngine:
         # ── Try weasyprint (best quality) ────────────────────────
         try:
             from weasyprint import HTML
+
             buf = io.BytesIO()
             HTML(string=html).write_pdf(buf)
             buf.seek(0)
@@ -254,14 +257,12 @@ class ExportEngine:
         in a clean layout. Installed via: pip install reportlab
         """
         try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import cm
             from reportlab.lib import colors
-            from reportlab.platypus import (
-                SimpleDocTemplate, Paragraph, Spacer, HRFlowable
-            )
             from reportlab.lib.enums import TA_LEFT
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.lib.units import cm
+            from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
             # Strip HTML tags for plain-text reportlab render
             plain = re.sub(r"<[^>]+>", "", html)
@@ -270,9 +271,12 @@ class ExportEngine:
 
             buf = io.BytesIO()
             doc = SimpleDocTemplate(
-                buf, pagesize=A4,
-                leftMargin=2*cm, rightMargin=2*cm,
-                topMargin=2*cm, bottomMargin=2*cm
+                buf,
+                pagesize=A4,
+                leftMargin=2 * cm,
+                rightMargin=2 * cm,
+                topMargin=2 * cm,
+                bottomMargin=2 * cm,
             )
             styles = getSampleStyleSheet()
             normal = styles["Normal"]
@@ -281,15 +285,16 @@ class ExportEngine:
             normal.leading = 14
 
             heading = ParagraphStyle(
-                "AEHeading", parent=styles["Heading1"],
-                fontSize=14, textColor=colors.HexColor("#0f3460"),
+                "AEHeading",
+                parent=styles["Heading1"],
+                fontSize=14,
+                textColor=colors.HexColor("#0f3460"),
                 spaceAfter=8,
             )
 
             story = []
             story.append(Paragraph("AetherForge — Session Export", heading))
-            story.append(HRFlowable(width="100%", thickness=1,
-                                     color=colors.HexColor("#e94560")))
+            story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e94560")))
             story.append(Spacer(1, 12))
 
             for line in plain.split("\n"):
@@ -311,8 +316,9 @@ class ExportEngine:
             return buf.read()
 
         except ImportError:
-            logger.error("Neither weasyprint nor reportlab available. "
-                         "Install: pip install reportlab")
+            logger.error(
+                "Neither weasyprint nor reportlab available. Install: pip install reportlab"
+            )
             raise RuntimeError(
                 "No PDF renderer available. "
                 "Run: pip install reportlab\n"

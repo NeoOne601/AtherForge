@@ -6,12 +6,12 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import time
 from collections import deque
 from typing import Any
 
 import numpy as np
+import structlog
 
 logger = structlog.get_logger("aetherforge.watchtower")
 
@@ -65,9 +65,12 @@ def ingest_metric(metric_name: str, value: float) -> dict[str, Any]:
             "mean": float(np.mean(arr)) if len(arr) > 0 else 0.0,
             "std": float(np.std(arr)),
         }
-        logger.info("WatchTower baseline calibrated for '%s': mean=%.2f std=%.2f",
-                    metric_name, _CALIBRATION_BASELINE[metric_name]["mean"],
-                    _CALIBRATION_BASELINE[metric_name]["std"])
+        logger.info(
+            "WatchTower baseline calibrated for '%s': mean=%.2f std=%.2f",
+            metric_name,
+            _CALIBRATION_BASELINE[metric_name]["mean"],
+            _CALIBRATION_BASELINE[metric_name]["std"],
+        )
 
     if metric_name in _CALIBRATION_BASELINE:
         baseline = _CALIBRATION_BASELINE[metric_name]

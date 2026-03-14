@@ -15,6 +15,18 @@ export default function App() {
     const [xrayOpen, setXrayOpen] = useState(false);
     const [online, setOnline] = useState(false);
     const [cpuPct, setCpuPct] = useState<number | null>(null);
+    const [visualTheme, setVisualTheme] = useState("Sovereign Dark");
+
+    const getThemeClass = (themeName: string) => {
+        const mapping: Record<string, string> = {
+            "Sovereign Dark": "theme-sovereign",
+            "Nordic Frost": "theme-nordic",
+            "Neon Cyberpunk": "theme-cyberpunk",
+            "Monochrome Pro": "theme-monochrome",
+            "Forest Terminal": "theme-forest"
+        };
+        return mapping[themeName] || "theme-sovereign";
+    };
 
     // ── Chat Model State ──────────────────────────────────────────
     const [chatModels, setChatModels] = useState<any[]>([]);
@@ -30,6 +42,15 @@ export default function App() {
             setChatModels(d.models || []);
             if (d.selected) setSelectedChatModel(d.selected);
         }).catch(() => { });
+
+        // Fetch visual theme from settings
+        fetch("/api/v1/settings")
+            .then(r => r.json())
+            .then(data => {
+                const theme = data.server?.fields?.VISUAL_THEME?.value;
+                if (theme) setVisualTheme(theme);
+            })
+            .catch(() => { });
     }, []);
 
     const handleChatModelChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -125,7 +146,7 @@ export default function App() {
     }, []);
 
     return (
-        <div className="app-shell">
+        <div className={`app-shell ${getThemeClass(visualTheme)}`}>
             {/* Header */}
             <header className="app-header">
                 <div className="app-logo">
@@ -314,6 +335,7 @@ export default function App() {
                         webSearchEnabled={webSearchEnabled}
                         deepReasoningEnabled={deepReasoningEnabled}
                         onToggleDeepReasoning={() => setDeepReasoningEnabled(!deepReasoningEnabled)}
+                        analyticsEnabled={analyticsEnabled}
                         grammarAssist={grammarAssistEnabled}
                         onToggleGrammarAssist={() => setGrammarAssistEnabled(!grammarAssistEnabled)}
                     />}

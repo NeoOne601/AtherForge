@@ -1,17 +1,21 @@
 import json
-import asyncio
+
 import structlog
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
 from src.schemas import RSSFeedRequest
 
 router = APIRouter(prefix="/api/v1/streamsync", tags=["StreamSync"])
 logger = structlog.get_logger("aetherforge.streamsync")
 
+
 @router.get("/events/stream")
 async def get_event_stream() -> JSONResponse:
     from src.modules.streamsync.graph import _EVENT_STREAM
+
     return JSONResponse(list(_EVENT_STREAM))
+
 
 @router.post("/rss/add")
 async def add_rss_feed(request: RSSFeedRequest, fastapi_request: Request) -> JSONResponse:
@@ -24,6 +28,7 @@ async def add_rss_feed(request: RSSFeedRequest, fastapi_request: Request) -> JSO
             json.dump({"feeds": state.streamsync_rss_feeds}, f)
         logger.info("Added RSS feed: %s", request.url)
     return JSONResponse({"status": "Success", "feeds": state.streamsync_rss_feeds})
+
 
 @router.post("/rss/remove")
 async def remove_rss_feed(request: RSSFeedRequest, fastapi_request: Request) -> JSONResponse:

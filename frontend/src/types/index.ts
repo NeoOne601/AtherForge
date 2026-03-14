@@ -1,16 +1,3 @@
-// ── Types ────────────────────────────────────────────────────────
-export interface Message {
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-    module: string;
-    latency_ms?: number;
-    faithfulness_score?: number;
-    policy_decisions?: PolicyDecision[];
-    causal_graph?: CausalGraph;
-    blocked?: boolean;
-}
-
 export interface PolicyDecision {
     allowed: boolean;
     reason: string;
@@ -21,7 +8,7 @@ export interface PolicyDecision {
 
 export interface CausalGraph {
     nodes: { id: string; data: Record<string, unknown>; ts: number }[];
-    edges: { source: string; target: string }[];
+    edges: { source: string; target: string; label?: string }[];
     total_latency_ms: number;
 }
 
@@ -66,30 +53,40 @@ export interface ReplayItem {
     is_used_for_training: boolean;
 }
 
+export interface ChatCitation {
+    source: string;
+    page?: number | string | null;
+    section?: string | null;
+    snippet?: string | null;
+    kind: string;
+    label?: string | null;
+}
+
+export interface ToolCall {
+    name: string;
+    arguments?: Record<string, unknown>;
+    args?: Record<string, unknown>;
+    result?: unknown;
+    attachments?: string[];
+    citations?: ChatCitation[];
+}
+
 export interface Message {
     id: string;
     role: "user" | "assistant";
     content: string;
     module: string;
+    streaming?: boolean;
     latency_ms?: number;
     faithfulness_score?: number;
+    reasoning_trace?: string;
+    answer_text?: string;
     policy_decisions?: PolicyDecision[];
     causal_graph?: CausalGraph;
     blocked?: boolean;
-}
-
-export interface PolicyDecision {
-    allowed: boolean;
-    reason: string;
-    deny_reasons: string[];
-    fsm_state: string;
-    latency_ms: number;
-}
-
-export interface CausalGraph {
-    nodes: { id: string; data: Record<string, unknown>; ts: number }[];
-    edges: { source: string; target: string }[];
-    total_latency_ms: number;
+    tool_calls?: ToolCall[];
+    citations?: ChatCitation[];
+    attachments?: string[];
 }
 
 // ── Constants ────────────────────────────────────────────────────

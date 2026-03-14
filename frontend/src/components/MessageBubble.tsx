@@ -4,14 +4,30 @@ import { md } from "../lib/markdown";
 
 /**
  * Parse <think>...</think> blocks from AI response text.
- * Returns { thinking: string | null, answer: string }.
+ * Handles both complete and in-progress reasoning blocks.
  */
 function parseThinking(content: string): { thinking: string | null; answer: string } {
-    const thinkRegex = /<think>([\s\S]*?)<\/think>/;
-    const match = content.match(thinkRegex);
-    if (!match) return { thinking: null, answer: content };
-    const thinking = match[1].trim();
-    const answer = content.replace(thinkRegex, "").trim();
+    const openTag = "<think>";
+    const closeTag = "</think>";
+    const start = content.indexOf(openTag);
+
+    if (start === -1) {
+        return { thinking: null, answer: content };
+    }
+
+    const before = content.slice(0, start).trim();
+    const afterOpen = content.slice(start + openTag.length);
+    const end = afterOpen.indexOf(closeTag);
+
+    if (end === -1) {
+        return {
+            thinking: afterOpen.trim(),
+            answer: before,
+        };
+    }
+
+    const thinking = afterOpen.slice(0, end).trim();
+    const answer = `${before}\n${afterOpen.slice(end + closeTag.length)}`.trim();
     return { thinking, answer };
 }
 
@@ -37,13 +53,21 @@ interface MessageBubbleProps {
 export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) {
     const isUser = msg.role === "user";
     const fScore = msg.faithfulness_score;
-    let { thinking, answer } = isUser
-        ? { thinking: null, answer: msg.content }
-        : parseThinking(msg.content);
-        
+
+    let thinking: string | null = null;
+    let answer = msg.content;
+
+    if (!isUser) {
+        const parsed = parseThinking(msg.content);
+        thinking = msg.reasoning_trace ?? parsed.thinking;
+        answer = msg.answer_text ?? parsed.answer;
+    }
+
     // Extract attachments
     const { cleanedAnswer, attachments } = parseAttachments(answer);
     answer = cleanedAnswer;
+    const mergedAttachments = Array.from(new Set([...(msg.attachments || []), ...attachments]));
+    const citations = msg.citations || [];
 
     return (
         <div className={`message-row ${isUser ? "user" : ""}`}>
@@ -53,8 +77,10 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
             <div className={`bubble ${isUser ? "user-bubble" : "ai"}`}>
                 {/* Thinking section (collapsible) */}
                 {!isUser && thinking && showThinking && (
-                    <details className="thinking-section">
-                        <summary className="thinking-summary">🧠 Thinking process</summary>
+                    <details className="thinking-section" open={msg.streaming ? true : undefined}>
+                        <summary className="thinking-summary">
+                            {msg.streaming ? "🧠 Reasoning..." : "🧠 Reasoning trace"}
+                        </summary>
                         <div
                             className="thinking-content markdown-body"
                             dangerouslySetInnerHTML={{ __html: md.render(thinking) }}
@@ -65,6 +91,12 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
                 {/* Main answer */}
                 {isUser ? (
                     <div className="message-text">{msg.content}</div>
+                ) : msg.streaming && !thinking && !answer ? (
+                    <div className="typing-indicator" style={{ marginTop: "4px" }}>
+                        <div className="typing-dot" />
+                        <div className="typing-dot" />
+                        <div className="typing-dot" />
+                    </div>
                 ) : (
                     <div
                         className="message-text markdown-body"
@@ -73,12 +105,12 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
                 )}
 
                 {/* Attachments */}
-                {attachments.length > 0 && (
+                {mergedAttachments.length > 0 && (
                     <div className="attachments-container" style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {attachments.map((file, i) => {
+                        {mergedAttachments.map((file, i) => {
                             const ext = file.split(".").pop()?.toLowerCase();
                             const url = `http://localhost:8765/api/v1/generated/${file}`;
-                            
+
                             if (ext === "png" || ext === "jpg" || ext === "jpeg") {
                                 return (
                                     <div key={i} className="attachment-image-card" style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', backgroundColor: 'var(--bg-panel)' }}>
@@ -106,9 +138,50 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
                     </div>
                 )}
 
+                {!isUser && citations.length > 0 && (
+                    <details className="citation-section" style={{ marginTop: "12px" }}>
+                        <summary className="thinking-summary">Sources ({citations.length})</summary>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px" }}>
+                            {citations.map((citation, index) => {
+                                const locatorParts = [citation.source];
+                                if (citation.page !== undefined && citation.page !== null && citation.page !== "") {
+                                    locatorParts.push(`p.${citation.page}`);
+                                }
+                                if (citation.section) {
+                                    locatorParts.push(citation.section);
+                                }
+
+                                return (
+                                    <div
+                                        key={`${citation.source}-${index}`}
+                                        style={{
+                                            padding: "10px 12px",
+                                            borderRadius: "8px",
+                                            border: "1px solid var(--border-color)",
+                                            background: "rgba(255,255,255,0.03)",
+                                        }}
+                                    >
+                                        <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-main)" }}>
+                                            {citation.label || `[${index + 1}]`} {locatorParts.join(" | ")}
+                                        </div>
+                                        {citation.snippet && (
+                                            <div style={{ fontSize: "13px", color: "var(--text-muted)", marginTop: "6px", lineHeight: 1.5 }}>
+                                                {citation.snippet}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </details>
+                )}
+
                 {!isUser && (
                     <div className="bubble-meta">
                         <span className="badge module">{msg.module}</span>
+                        {msg.streaming && (
+                            <span className="badge latency">streaming</span>
+                        )}
                         {msg.latency_ms !== undefined && (
                             <span className="badge latency">{msg.latency_ms.toFixed(0)}ms</span>
                         )}

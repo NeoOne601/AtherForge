@@ -6,10 +6,10 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import asyncio
-import structlog
 import time
 from typing import Any
+
+import structlog
 
 logger = structlog.get_logger("aetherforge.tunelab")
 
@@ -44,7 +44,8 @@ def run_tunelab(
 
     if action_lower == "status":
         from src.config import get_settings
-        from src.learning.oploRA_manager import OPLoRAManager
+        from src.learning.oplora_manager import OPLoRAManager
+
         settings = get_settings()
         manager = OPLoRAManager(settings)
         manager.load_checkpoints()

@@ -21,14 +21,40 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, SystemMessage
+import structlog  # type: ignore
+
+# langchain_core might be missing in some environments, but we need the types
+try:
+    from langchain_core.documents import Document
+    from langchain_core.messages import HumanMessage, SystemMessage
+except ImportError:
+    # Fallback for static analysis if imports fail
+    class Document:
+        def __init__(self, page_content: str, metadata: dict[str, Any] | None = None) -> None:
+            self.page_content = page_content
+            self.metadata = metadata or {}
+
+    class HumanMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class SystemMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+
+@runtime_checkable
+class LLMProtocol(Protocol):
+    def __call__(
+        self, messages: list[Any], max_tokens: int | None = None, temperature: float | None = None
+    ) -> str: ...
+
 
 logger = structlog.get_logger("aetherforge.cognitiverag")
 
@@ -39,6 +65,7 @@ QueryType = Literal["FACTUAL", "COMPARATIVE", "SYNTHESIS", "VAGUE"]
 @dataclass
 class ThinkingTrace:
     """Captures the full reasoning trace for observability / X-Ray mode."""
+
     query_type: QueryType = "FACTUAL"
     sub_questions: list[str] = field(default_factory=list)
     hyde_hypothesis: str = ""
@@ -62,7 +89,7 @@ class CognitiveRAG:
 
     def __init__(
         self,
-        llm_fn: Callable[[list[Any], int | None, float | None], str],
+        llm_fn: LLMProtocol,
         search_fn: Callable[..., list[Document]],
         embedding_fn: Callable[[str], list[float]] | None = None,
     ) -> None:
@@ -85,6 +112,7 @@ class CognitiveRAG:
         query: str,
         source_filter: str | list[str] | None = None,
         max_retries: int = 1,
+        prompt_variant: str = "v1",
     ) -> tuple[str, list[Document], ThinkingTrace]:
         """
         Execute the full CognitiveRAG pipeline.
@@ -97,8 +125,7 @@ class CognitiveRAG:
 
         # ── Stage 1: Query Understanding ─────────────────────────
         trace.query_type = self._classify_query(query)
-        logger.info("CognitiveRAG ① QueryType: %s for '%s...'",
-                    trace.query_type, query[:60])
+        logger.info("CognitiveRAG ① QueryType: %s for '%s...'", trace.query_type, str(query)[:60])  # type: ignore
 
         # ── Stage 2: Decompose or HyDE based on query type ──────
         search_queries: list[str] = []
@@ -113,16 +140,18 @@ class CognitiveRAG:
             hypothesis = self._hyde_generate(query)
             trace.hyde_hypothesis = hypothesis
             search_queries = [hypothesis, query]  # search with both
-            logger.info("CognitiveRAG ② HyDE hypothesis generated (%d chars)",
-                       len(hypothesis))
+            logger.info("CognitiveRAG ② HyDE hypothesis generated (%d chars)", len(hypothesis))
         else:
             # FACTUAL — direct search
             search_queries = [query]
 
         # ── Stage 3: Multi-path Hybrid Search ────────────────────
         all_docs = self._multi_path_search(search_queries, source_filter)
-        logger.info("CognitiveRAG ③ Retrieved %d unique chunks from %d queries",
-                    len(all_docs), len(search_queries))
+        logger.info(
+            "CognitiveRAG ③ Retrieved %d unique chunks from %d queries",
+            len(all_docs),
+            len(search_queries),
+        )
 
         if not all_docs:
             trace.latency_ms = (time.perf_counter() - t0) * 1000
@@ -134,12 +163,12 @@ class CognitiveRAG:
 
         # ── Stage 4: Evidence Scoring ────────────────────────────
         scored_docs = self._score_evidence(query, all_docs)
-        top_docs = scored_docs[:5]  # keep top 5 after scoring (reduced from 8 to prevent context overload)
+        top_docs: list[Document] = scored_docs[:5]  # type: ignore
         trace.evidence_chunks = len(top_docs)
         logger.info("CognitiveRAG ④ Top %d evidence chunks scored", len(top_docs))
 
         # ── Stage 5: Chain-of-Thought Synthesis ──────────────────
-        answer, reasoning = self._chain_of_thought(query, top_docs, trace)
+        answer, reasoning = self._chain_of_thought(query, top_docs, trace, prompt_variant)
         trace.reasoning_chain = reasoning
         logger.info("CognitiveRAG ⑤ CoT synthesis complete (%d chars)", len(answer))
 
@@ -147,9 +176,11 @@ class CognitiveRAG:
         grounding_score = self._self_verify(query, answer, top_docs)
         trace.grounding_score = grounding_score
         trace.verification_passed = grounding_score > 0.0
-        logger.info("CognitiveRAG ⑥ Self-verification: %s (score=%.1f)",
-                    "PASSED ✓" if trace.verification_passed else "FAILED ✗",
-                    grounding_score)
+        logger.info(
+            "CognitiveRAG ⑥ Self-verification: %s (score=%.1f)",
+            "PASSED ✓" if trace.verification_passed else "FAILED ✗",
+            grounding_score,
+        )
 
         # ── Stage 7: Iterative Re-retrieval (if verification fails)
         if not trace.verification_passed and max_retries > 0:
@@ -160,14 +191,20 @@ class CognitiveRAG:
                 refined_query,
                 source_filter=source_filter,
                 max_retries=max_retries - 1,
+                prompt_variant=prompt_variant,
             )
             trace.verification_passed = sub_trace.verification_passed
 
         trace.latency_ms = (time.perf_counter() - t0) * 1000
-        logger.info("CognitiveRAG pipeline complete — %.0fms | type=%s | "
-                    "evidence=%d | verified=%s | rounds=%d",
-                    trace.latency_ms, trace.query_type, trace.evidence_chunks,
-                    trace.verification_passed, trace.retrieval_rounds)
+        logger.info(
+            "CognitiveRAG pipeline complete — %.0fms | type=%s | "
+            "evidence=%d | verified=%s | rounds=%d",
+            trace.latency_ms,
+            trace.query_type,
+            trace.evidence_chunks,
+            trace.verification_passed,
+            trace.retrieval_rounds,
+        )
 
         return answer, top_docs, trace
 
@@ -181,15 +218,17 @@ class CognitiveRAG:
         ~50 tokens output. Uses constrained generation for reliability.
         """
         messages = [
-            SystemMessage(content=(
-                "Classify this question into EXACTLY ONE category. "
-                "Reply with ONLY the category name, nothing else.\n\n"
-                "Categories:\n"
-                "FACTUAL — asking for specific facts, definitions, names, dates, numbers\n"
-                "COMPARATIVE — comparing two or more things, asking about differences/similarities\n"
-                "SYNTHESIS — asking for summary, overview, analysis, or combining multiple concepts\n"
-                "VAGUE — unclear, abstract, or very broad question that needs interpretation"
-            )),
+            SystemMessage(
+                content=(
+                    "Classify this question into EXACTLY ONE category. "
+                    "Reply with ONLY the category name, nothing else.\n\n"
+                    "Categories:\n"
+                    "FACTUAL — asking for specific facts, definitions, names, dates, numbers\n"
+                    "COMPARATIVE — comparing two or more things, asking about differences/similarities\n"
+                    "SYNTHESIS — asking for summary, overview, analysis, or combining multiple concepts\n"
+                    "VAGUE — unclear, abstract, or very broad question that needs interpretation"
+                )
+            ),
             HumanMessage(content=query),
         ]
 
@@ -214,12 +253,14 @@ class CognitiveRAG:
         ~100 tokens output.
         """
         messages = [
-            SystemMessage(content=(
-                "Break this complex question into 2-4 simpler, self-contained "
-                "sub-questions that together answer the original. "
-                "Output ONLY the sub-questions, one per line, numbered 1-4. "
-                "No explanations."
-            )),
+            SystemMessage(
+                content=(
+                    "Break this complex question into 2-4 simpler, self-contained "
+                    "sub-questions that together answer the original. "
+                    "Output ONLY the sub-questions, one per line, numbered 1-4. "
+                    "No explanations."
+                )
+            ),
             HumanMessage(content=query),
         ]
 
@@ -236,7 +277,7 @@ class CognitiveRAG:
         if not sub_questions:
             return [query]
 
-        return sub_questions[:4]  # cap at 4
+        return sub_questions[:4]  # type: ignore
 
     # ─────────────────────────────────────────────────────────────
     # STAGE 2b: HyDE — Hypothetical Document Embeddings
@@ -249,13 +290,15 @@ class CognitiveRAG:
         ~150 tokens output.
         """
         messages = [
-            SystemMessage(content=(
-                "You are a research paper expert. Given a vague question, write "
-                "a short paragraph (3-4 sentences) that would be a plausible "
-                "answer found in a research paper. Do NOT say 'I don't know'. "
-                "Write as if you are quoting from an actual document. "
-                "Be specific and use technical language."
-            )),
+            SystemMessage(
+                content=(
+                    "You are a research paper expert. Given a vague question, write "
+                    "a short paragraph (3-4 sentences) that would be a plausible "
+                    "answer found in a research paper. Do NOT say 'I don't know'. "
+                    "Write as if you are quoting from an actual document. "
+                    "Be specific and use technical language."
+                )
+            ),
             HumanMessage(content=query),
         ]
 
@@ -284,14 +327,13 @@ class CognitiveRAG:
                     k=6,
                     source_filter=source_filter,
                 )
-                for doc in docs:
-                    doc_id = doc.metadata.get("chunk_id", doc.page_content[:80])
+                for doc in docs or []:  # type: ignore
+                    doc_id: str = str(doc.metadata.get("chunk_id", str(doc.page_content)[:80]))  # type: ignore
                     if doc_id not in seen_ids:
                         seen_ids.add(doc_id)
                         all_docs.append(doc)
             except Exception as e:
-                logger.warning("Multi-path search failed for sub-query '%s...': %s",
-                             q[:50], e)
+                logger.warning("Multi-path search failed for sub-query '%s...': %s", str(q)[:50], e)
 
         return all_docs
 
@@ -318,21 +360,25 @@ class CognitiveRAG:
         evidence_list = []
         for i, doc in enumerate(docs):
             snippet = doc.page_content[:300].replace("\n", " ")
-            evidence_list.append(f"[{i+1}] {snippet}")
+            evidence_list.append(f"[{i + 1}] {snippet}")
         evidence_text = "\n".join(evidence_list)
 
         messages = [
-            SystemMessage(content=(
-                "You are rating evidence relevance. Given a question and numbered "
-                "evidence snippets, return ONLY the snippet numbers ranked from "
-                "MOST to LEAST relevant. Format: comma-separated numbers. "
-                "Example: 3,1,5,2,4"
-            )),
-            HumanMessage(content=(
-                f"Question: {query}\n\n"
-                f"Evidence:\n{evidence_text}\n\n"
-                f"Rank (most to least relevant):"
-            )),
+            SystemMessage(
+                content=(
+                    "You are rating evidence relevance. Given a question and numbered "
+                    "evidence snippets, return ONLY the snippet numbers ranked from "
+                    "MOST to LEAST relevant. Format: comma-separated numbers. "
+                    "Example: 3,1,5,2,4"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"Question: {query}\n\n"
+                    f"Evidence:\n{evidence_text}\n\n"
+                    f"Rank (most to least relevant):"
+                )
+            ),
         ]
 
         result = self.llm(messages, max_tokens=50, temperature=0.0)
@@ -340,7 +386,7 @@ class CognitiveRAG:
         # Parse ranking
         try:
             # Extract numbers from the response
-            nums = [int(n.strip()) for n in re.findall(r'\d+', result)]
+            nums = [int(n.strip()) for n in re.findall(r"\d+", result)]
             ranked_docs = []
             seen = set()
             for n in nums:
@@ -392,95 +438,15 @@ class CognitiveRAG:
             "Your objective is high faithfulness. Prefer quoting relevant parts of the text.\n\n"
             "{cot_instruction}\n\n"
             "Evidence Blocks:\n{evidence_text}"
-        )
+        ),
     }
 
-    def think_and_answer(
+    def _chain_of_thought(
         self,
         query: str,
-        source_filter: str | list[str] | None = None,
-        max_retries: int = 1,
-        prompt_variant: str = "v1",
-    ) -> tuple[str, list[Document], ThinkingTrace]:
-        """
-        Execute the full CognitiveRAG pipeline.
-
-        Returns:
-            (answer_text, evidence_docs, thinking_trace)
-        """
-        t0 = time.perf_counter()
-        trace = ThinkingTrace()
-
-        # ── Stage 1: Query Understanding ─────────────────────────
-        trace.query_type = self._classify_query(query)
-        logger.info("CognitiveRAG ① QueryType: %s for '%s...'",
-                    trace.query_type, query[:40])
-
-        # ── Stage 2: HyDE / Query Decomposition ──────────────────
-        sub_queries = [query]
-        if trace.query_type == "VAGUE" and self.embed:
-            sub_queries.append(self._hyde_generate(query))
-            trace.hyde_hypothesis = sub_queries[-1]
-            logger.info("CognitiveRAG ② HyDE hyp: %s...", trace.hyde_hypothesis[:40])
-        elif trace.query_type in ("COMPARATIVE", "SYNTHESIS"):
-            decomposed = self._decompose_query(query)
-            if decomposed:
-                sub_queries.extend(decomposed)
-                trace.sub_questions = decomposed
-                logger.info("CognitiveRAG ② Decomposed into %d sub-queries", len(decomposed))
-
-        # ── Stage 3: Multi-path Hybrid Search ────────────────────
-        all_candidate_docs: list[Document] = []
-        for sq in set(sub_queries):
-            docs = self.search(
-                query=sq,
-                filter_source=source_filter,
-                k=6,
-                semantic_ratio=0.7
-            )
-            all_candidate_docs.extend(docs)
-        logger.info("CognitiveRAG ③ Retrieved %d total candidate chunks", len(all_candidate_docs))
-
-        # ── Stage 4: Evidence Scoring & Deduplication ────────────
-        scored_evidence = self._score_evidence(query, all_candidate_docs)
-        if not scored_evidence:
-            trace.latency_ms = (time.perf_counter() - t0) * 1000
-            error_msg = ("I could not find any relevant information in the provided "
-                         "documents to answer your question.")
-            return error_msg, [], trace
-
-        trace.evidence_chunks = len(scored_evidence)
-        logger.info("CognitiveRAG ④ Filtered down to %d high-quality chunks", trace.evidence_chunks)
-
-        # ── Stage 5: Chain-of-Thought Generation ─────────────────
-        evidence_parts = []
-        for i, doc in enumerate(scored_evidence):
-            meta = doc.metadata
-            source = meta.get("source", "Unknown")
-            page = meta.get("page", "?")
-            section = meta.get("section", "")
-            citation = f"[{i+1}] {source} | p.{page}"
-            if section:
-                citation += f" | §{section[:60]}"
-            evidence_parts.append(f"{citation}\n{doc.page_content}")
-
-        evidence_text = "\n\n".join(evidence_parts)
-
-        # Adapt the CoT prompt based on query type
-        cot_instruction = self._get_cot_instruction(trace.query_type)
-        
-        # Load the selected prompt variant
-        prompt_template = self._RAG_PROMPT_VARIANTS.get(prompt_variant, self._RAG_PROMPT_VARIANTS["v1"])
-        filled_prompt = prompt_template.format(
-            cot_instruction=cot_instruction,
-            evidence_text=evidence_text
-        )
-
-        messages = [
-            SystemMessage(content=filled_prompt),
-            HumanMessage(content=query),
-        ]        docs: list[Document],
+        docs: list[Document],
         trace: ThinkingTrace,
+        prompt_variant: str = "v1",
     ) -> tuple[str, str]:
         """
         Force the LLM to reason step-by-step through the evidence.
@@ -493,7 +459,7 @@ class CognitiveRAG:
             source = meta.get("source", "Unknown")
             page = meta.get("page", "?")
             section = meta.get("section", "")
-            citation = f"[{i+1}] {source} | p.{page}"
+            citation = f"[{i + 1}] {source} | p.{page}"
             if section:
                 citation += f" | §{section[:60]}"
             evidence_parts.append(f"{citation}\n{doc.page_content}")
@@ -503,27 +469,16 @@ class CognitiveRAG:
         # Adapt the CoT prompt based on query type
         cot_instruction = self._get_cot_instruction(trace.query_type)
 
+        # Load the selected prompt variant
+        prompt_template = self._RAG_PROMPT_VARIANTS.get(
+            prompt_variant, self._RAG_PROMPT_VARIANTS["v1"]
+        )
+        filled_prompt = prompt_template.format(
+            cot_instruction=cot_instruction, evidence_text=evidence_text
+        )
+
         messages = [
-            SystemMessage(content=(
-                "You are RAGForge CognitiveRAG — a precise document intelligence "
-                "assistant that THINKS before answering.\n\n"
-                "CRITICAL RULES:\n"
-                "1. Answer EXCLUSIVELY from the Evidence below. NEVER use your prior knowledge or training data.\n"
-                "2. If the EXACT answer or supporting facts cannot be found in the Evidence, you MUST output precisely: 'The provided documents do not contain this information.' Do not attempt to guess or hallucinate.\n"
-                "3. For specific facts, cite as [1], [2], etc.\n"
-                "4. NEVER guess or embellish.\n\n"
-                "FORMATTING RULES (strictly follow):\n"
-                "- Use **bold** for key terms and section titles.\n"
-                "- Use bullet points (- ) for lists of items.\n"
-                "- Use numbered lists (1. 2. 3.) for steps or ranked items.\n"
-                "- Use a blank line between paragraphs.\n"
-                "- Keep responses concise: 1-3 sentences for FACTUAL, structured sections for SYNTHESIS.\n"
-                "- DO NOT produce one long run-on paragraph.\n"
-                "- For visual elements (figures, tables, charts): describe in structured bullet points covering "
-                "  title, axes/headers, key data points, and main takeaway.\n\n"
-                f"{cot_instruction}\n\n"
-                f"Evidence:\n{evidence_text}"
-            )),
+            SystemMessage(content=filled_prompt),
             HumanMessage(content=query),
         ]
 
@@ -532,24 +487,24 @@ class CognitiveRAG:
         # Extract reasoning chain and final answer using XML tags
         reasoning = ""
         answer = result.strip()
-        
+
         # Try to extract the <think> block
-        reasoning_match = re.search(r'<think>(.*?)</think>', result, re.DOTALL | re.IGNORECASE)
+        reasoning_match = re.search(r"<think>(.*?)</think>", result, re.DOTALL | re.IGNORECASE)
         if reasoning_match:
             reasoning = reasoning_match.group(1).strip()
-            
+
         # Try to extract the <answer> block
-        answer_match = re.search(r'<answer>(.*?)</answer>', result, re.DOTALL | re.IGNORECASE)
+        answer_match = re.search(r"<answer>(.*?)</answer>", result, re.DOTALL | re.IGNORECASE)
         if answer_match:
             answer = answer_match.group(1).strip()
         elif reasoning_match:
-            # If there was a reasoning block but no strict <answer> block, 
+            # If there was a reasoning block but no strict <answer> block,
             # assume everything after </think> is the final answer
-            parts = re.split(r'</think>', result, flags=re.IGNORECASE)
+            parts = re.split(r"</think>", result, flags=re.IGNORECASE)
             if len(parts) > 1:
                 answer = parts[-1].strip()
 
-        # We return (clean_answer, raw_reasoning). 
+        # We return (clean_answer, raw_reasoning).
         # The formatting into <details> tags happens in the caller (MetaAgent)
         # so SAMR-lite can score ONLY the clean_answer.
         return answer, reasoning
@@ -618,22 +573,27 @@ class CognitiveRAG:
         """
         # Concatenate top evidence snippets for verification
         evidence_snippets = "\n".join(
-            doc.page_content[:200] for doc in docs[:5]
+            str(doc.page_content)[:200]
+            for doc in docs[:5]  # type: ignore
         )
 
         messages = [
-            SystemMessage(content=(
-                "You are a strict fact-checker. Given an Answer and Evidence, "
-                "determine if the Answer is FULLY SUPPORTED by the Evidence.\n\n"
-                "Reply with ONLY one word:\n"
-                "SUPPORTED — if every claim in the answer appears in the evidence\n"
-                "UNSUPPORTED — if the answer makes claims NOT found in the evidence\n"
-                "PARTIAL — if some claims are supported but others are not"
-            )),
-            HumanMessage(content=(
-                f"Answer: {answer[:400]}\n\n"
-                f"Evidence: {evidence_snippets}"
-            )),
+            SystemMessage(
+                content=(
+                    "You are a strict fact-checker. Given an Answer and Evidence, "
+                    "determine if the Answer is FULLY SUPPORTED by the Evidence.\n\n"
+                    "Reply with ONLY one word:\n"
+                    "SUPPORTED — if every claim in the answer appears in the evidence\n"
+                    "UNSUPPORTED — if the answer makes claims NOT found in the evidence\n"
+                    "PARTIAL — if some claims are supported but others are not"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"Answer: {str(answer)[:400]}\n\n"  # type: ignore
+                    f"Evidence: {evidence_snippets}"
+                )
+            ),
         ]
 
         result = self.llm(messages, max_tokens=10, temperature=0.0)
@@ -644,7 +604,7 @@ class CognitiveRAG:
             score = 0.0
         elif "PARTIAL" in result:
             score = 0.5
-            
+
         return score
 
     # ─────────────────────────────────────────────────────────────
@@ -657,17 +617,21 @@ class CognitiveRAG:
         Uses the failed answer to understand what information is missing.
         """
         messages = [
-            SystemMessage(content=(
-                "The following answer was generated but could not be verified "
-                "against the source documents. Write a more specific search "
-                "query that would find the correct information. "
-                "Reply with ONLY the refined query, nothing else."
-            )),
-            HumanMessage(content=(
-                f"Original question: {original_query}\n"
-                f"Failed answer: {failed_answer[:200]}\n"
-                f"Refined query:"
-            )),
+            SystemMessage(
+                content=(
+                    "The following answer was generated but could not be verified "
+                    "against the source documents. Write a more specific search "
+                    "query that would find the correct information. "
+                    "Reply with ONLY the refined query, nothing else."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"Original question: {original_query}\n"
+                    f"Failed answer: {str(failed_answer)[:200]}\n"  # type: ignore
+                    f"Refined query:"
+                )
+            ),
         ]
 
         result = self.llm(messages, max_tokens=100, temperature=0.2)

@@ -1,18 +1,20 @@
-import json
-import structlog
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 logger = structlog.get_logger("aetherforge.sync.event_log")
+
 
 class HybridLogicalClock:
     """
     A simple Hybrid Logical Clock (HLC) for CRDT causal ordering.
     Format: <physical_time_ms>-<logical_counter>-<node_id>
     """
+
     def __init__(self, node_id: str):
         self.node_id = node_id
         self.physical_time = 0
@@ -25,15 +27,17 @@ class HybridLogicalClock:
             self.logical_counter = 0
         else:
             self.logical_counter += 1
-        
+
         # Zero-pad logical counter for lexicographical sorting
         return f"{self.physical_time}-{self.logical_counter:04d}-{self.node_id}"
+
 
 class EventLog:
     """
     SQLite-backed Write-Ahead Log (WAL) for Eventual Consistency.
     Every state change in AetherForge is written here as an immutable event.
     """
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,16 +62,35 @@ class EventLog:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hlc on sync_events(hlc_timestamp);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entity on sync_events(entity_id);")
 
-    def append_event(self, hlc_timestamp: str, entity_type: str, entity_id: str, action: str, origin_device_id: str, encrypted_blob: bytes) -> str:
+    def append_event(
+        self,
+        hlc_timestamp: str,
+        entity_type: str,
+        entity_id: str,
+        action: str,
+        origin_device_id: str,
+        encrypted_blob: bytes,
+    ) -> str:
         """
         Append a new encrypted state mutation to the WAL.
         """
         event_id = str(uuid.uuid4())
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO sync_events (id, hlc_timestamp, entity_type, entity_id, action, origin_device_id, encrypted_blob)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (event_id, hlc_timestamp, entity_type, entity_id, action, origin_device_id, sqlite3.Binary(encrypted_blob)))
+            """,
+                (
+                    event_id,
+                    hlc_timestamp,
+                    entity_type,
+                    entity_id,
+                    action,
+                    origin_device_id,
+                    sqlite3.Binary(encrypted_blob),
+                ),
+            )
             conn.commit()
         logger.debug(f"Appended event {event_id} for {entity_type}:{entity_id} to WAL")
         return event_id
@@ -79,14 +102,17 @@ class EventLog:
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT id, hlc_timestamp, entity_type, entity_id, action, origin_device_id, encrypted_blob
                 FROM sync_events
                 WHERE hlc_timestamp > ?
                 ORDER BY hlc_timestamp ASC
                 LIMIT ?
-            """, (since_hlc, limit))
-            
+            """,
+                (since_hlc, limit),
+            )
+
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -97,18 +123,21 @@ class EventLog:
         """
         try:
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO sync_events (id, hlc_timestamp, entity_type, entity_id, action, origin_device_id, encrypted_blob)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    event_dict["id"],
-                    event_dict["hlc_timestamp"],
-                    event_dict["entity_type"],
-                    event_dict["entity_id"],
-                    event_dict["action"],
-                    event_dict["origin_device_id"],
-                    sqlite3.Binary(event_dict["encrypted_blob"])
-                ))
+                """,
+                    (
+                        event_dict["id"],
+                        event_dict["hlc_timestamp"],
+                        event_dict["entity_type"],
+                        event_dict["entity_id"],
+                        event_dict["action"],
+                        event_dict["origin_device_id"],
+                        sqlite3.Binary(event_dict["encrypted_blob"]),
+                    ),
+                )
                 conn.commit()
                 return True
         except sqlite3.IntegrityError:

@@ -1,4 +1,4 @@
-# AetherForge v1.0 — tests/test_oploRA_manager.py
+# AetherForge v1.0 — tests/test_oplora_manager.py
 # ─────────────────────────────────────────────────────────────────
 # Unit tests for OPLoRA mathematical operations.
 # Validates the SVD projector math guarantees:
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from src.config import AetherForgeSettings
-from src.learning.oploRA_manager import LoRAWeights, OPLoRAManager
+from src.learning.oplora_manager import LoraWeightUpdate, OPLoRAManager
 
 
 @pytest.fixture
@@ -99,13 +99,13 @@ class TestProjectionPipeline:
         # Task 1 LoRA
         A1 = np.random.randn(r, d).astype(np.float32) * 0.1
         B1 = np.random.randn(d, r).astype(np.float32) * 0.1
-        lora1 = LoRAWeights(layer_key="layer.q_proj", A=A1, B=B1)
+        lora1 = LoraWeightUpdate(layer_key="layer.q_proj", A=A1, B=B1)
 
         # Register task 1
         manager.register_task("task_1", [lora1], rank_k=4)
 
         # Task 2 proposed LoRA (same direction → most should be projected away)
-        lora2 = LoRAWeights(layer_key="layer.q_proj", A=A1.copy(), B=B1.copy())
+        lora2 = LoraWeightUpdate(layer_key="layer.q_proj", A=A1.copy(), B=B1.copy())
         projected = manager.project_new_weights(lora2)
 
         norm_original = float(np.linalg.norm(lora2.delta_W))
@@ -118,7 +118,7 @@ class TestProjectionPipeline:
         d, r = 32, 4
         A = np.random.randn(r, d).astype(np.float32)
         B = np.random.randn(d, r).astype(np.float32)
-        lora = LoRAWeights(layer_key="new_layer", A=A, B=B)
+        lora = LoraWeightUpdate(layer_key="new_layer", A=A, B=B)
         projected = manager.project_new_weights(lora)
         # A and B should be unchanged
         np.testing.assert_array_equal(projected.A, A)
@@ -131,7 +131,7 @@ class TestProjectionPipeline:
         d, r = 32, 4
         A = np.random.randn(r, d).astype(np.float32)
         B = np.random.randn(d, r).astype(np.float32)
-        lora = LoRAWeights(layer_key="layer.q_proj", A=A, B=B)
+        lora = LoraWeightUpdate(layer_key="layer.q_proj", A=A, B=B)
         manager.register_task("task_a", [lora], rank_k=4)
         cap = manager.estimate_capacity()
         assert 0.0 <= cap < 1.0
@@ -143,11 +143,11 @@ class TestProjectionPipeline:
         assert "layers" in summary
 
     def test_lora_weights_delta_W(self):
-        """LoRAWeights.delta_W = (alpha/r) * B @ A."""
+        """LoraWeightUpdate.delta_W = (alpha/r) * B @ A."""
         r, d = 4, 16
         alpha = 32.0
         A = np.ones((r, d), dtype=np.float32)
         B = np.ones((d, r), dtype=np.float32)
-        lora = LoRAWeights(layer_key="test", A=A, B=B, alpha=alpha)
+        lora = LoraWeightUpdate(layer_key="test", A=A, B=B, alpha=alpha)
         expected = (alpha / r) * (B @ A)
         np.testing.assert_allclose(lora.delta_W, expected)

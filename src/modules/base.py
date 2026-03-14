@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.core.tool_registry import tool_registry
+
 
 class BaseModule(ABC):
     """
@@ -13,13 +15,29 @@ class BaseModule(ABC):
     def __init__(self, name: str):
         self.name = name
 
-    @abstractmethod
     async def initialize(self) -> None:
-        """Initialize module-specific resources."""
+        """One-time initialization logic (e.g. loading heavy models)."""
+        pass
+
+    def validate_payload(self, payload: dict[str, Any]) -> bool:
+        """Basic validation of incoming processing payloads."""
+        return True
+
+    @abstractmethod
+    def system_prompt_extension(self) -> str:
+        """Specific instructions this module adds to the global system prompt."""
         pass
 
     @abstractmethod
-    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+    async def process(self, payload: dict[str, Any], state: Any = None) -> dict[str, Any]:
+        """
+        Execute the primary logic for this module.
+        Returns a dict with 'content', 'metadata', and 'causal_edges'.
+        """
+        pass
+
+    @abstractmethod
+    def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return LLM tool definitions for this module."""
         return []
 
@@ -29,14 +47,17 @@ class BaseModule(ABC):
         for df in definitions:
             name = df.get("name")
             if name:
+
                 def _create_handler(n: str):
-                    def _handler(args: Dict[str, Any], state: Optional[Any] = None) -> str:
+                    def _handler(args: dict[str, Any], state: Any | None = None) -> Any:
                         return self.execute_tool(n, args, state)
+
                     return _handler
+
                 tool_registry.register_tool(df, _create_handler(name))
 
     @abstractmethod
-    def execute_tool(self, name: str, args: Dict[str, Any], state: Optional[Any] = None) -> str:
+    def execute_tool(self, name: str, args: dict[str, Any], state: Any | None = None) -> Any:
         """Execute a tool belonging to this module."""
         pass
 

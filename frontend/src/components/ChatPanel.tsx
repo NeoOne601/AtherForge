@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from "react";
 import { Message, RAGDoc, CausalGraph, MODULES, MODULE_SUGGESTIONS, StoredMessage, PolicyDecision } from "../types";
+import { createChatSocket } from "../lib/tauri";
 import { MessageBubble } from "./MessageBubble";
 import { InlineXRay } from "./InlineXRay";
 
@@ -25,6 +26,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({
     module, xray,
+    onXrayData,
     sessionId,
     preloadedMessages,
     onSessionCreated,
@@ -54,6 +56,10 @@ export function ChatPanel({
                 module,
                 latency_ms: (m.metadata?.latency_ms as number) || undefined,
                 faithfulness_score: (m.metadata?.faithfulness_score as number) || undefined,
+                reasoning_trace: (m.metadata?.reasoning_trace as string) || undefined,
+                answer_text: (m.metadata?.answer_text as string) || undefined,
+                citations: (m.metadata?.citations as Message["citations"]) || undefined,
+                attachments: (m.metadata?.attachments as string[]) || undefined,
             }));
         setMessagesByModule(prev => ({ ...prev, [module]: loaded }));
     }, [preloadedMessages, module]);
@@ -95,12 +101,37 @@ export function ChatPanel({
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const wsRef = useRef<WebSocket | null>(null);
+
+    useEffect(() => {
+        return () => {
+            wsRef.current?.close();
+        };
+    }, []);
 
     const autosize = useCallback(() => {
         const el = textareaRef.current;
         if (!el) return;
         el.style.height = "auto";
         el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    }, []);
+
+    const patchMessage = useCallback((moduleId: string, messageId: string, patch: Partial<Message>) => {
+        setMessagesByModule(prev => ({
+            ...prev,
+            [moduleId]: (prev[moduleId] || []).map(msg => msg.id === messageId ? { ...msg, ...patch } : msg),
+        }));
+    }, []);
+
+    const appendMessageChunk = useCallback((moduleId: string, messageId: string, chunk: string) => {
+        setMessagesByModule(prev => ({
+            ...prev,
+            [moduleId]: (prev[moduleId] || []).map(msg => (
+                msg.id === messageId
+                    ? { ...msg, content: msg.content + chunk, streaming: true }
+                    : msg
+            )),
+        }));
     }, []);
 
     const handleRefineClick = useCallback(async () => {
@@ -140,6 +171,9 @@ export function ChatPanel({
     const isDashboardOnlyModule = module === "streamsync" || module === "tunelab";
 
     useEffect(() => {
+        wsRef.current?.close();
+        wsRef.current = null;
+        setLoading(false);
         setInput("");
         if (textareaRef.current) {
             textareaRef.current.style.height = "auto";
@@ -154,28 +188,119 @@ export function ChatPanel({
         const text = input.trim();
         if (!text || loading) return;
 
+        const moduleId = module;
         const userMsg: Message = {
             id: Date.now().toString(),
             role: "user",
             content: text,
-            module,
+            module: moduleId,
+        };
+        const assistantId = `${Date.now()}-ai`;
+        const assistantMsg: Message = {
+            id: assistantId,
+            role: "assistant",
+            content: "",
+            module: moduleId,
+            streaming,
         };
 
         setMessagesByModule(prev => ({
             ...prev,
-            [module]: [...(prev[module] || []), userMsg]
+            [moduleId]: [...(prev[moduleId] || []), userMsg, assistantMsg]
         }));
         setInput("");
         setLoading(true);
         if (textareaRef.current) textareaRef.current.style.height = "auto";
 
         try {
-            const activeDocs = module === "ragforge" ? ragDocs.filter(d => d.active).map(d => d.name) : [];
+            const activeDocs = moduleId === "ragforge" ? ragDocs.filter(d => d.active).map(d => d.name) : [];
             const contextPayload: Record<string, any> = activeDocs.length > 0 ? { active_docs: activeDocs } : {};
             if (webSearchEnabled) contextPayload.web_search_enabled = true;
             if (deepReasoningEnabled) contextPayload.deep_reasoning = true;
 
-            const targetModule = (module === "ragforge" && analyticsEnabled) ? "analytics" : module;
+            const targetModule = (moduleId === "ragforge" && analyticsEnabled) ? "analytics" : moduleId;
+
+            if (streaming) {
+                wsRef.current?.close();
+
+                await new Promise<void>((resolve, reject) => {
+                    const ws = createChatSocket(
+                        currentSessionId,
+                        (chunk) => {
+                            if (chunk.type === "meta") {
+                                onSessionCreated?.(chunk.session_id);
+                                return;
+                            }
+
+                            if (chunk.type === "reasoning") {
+                                patchMessage(moduleId, assistantId, {
+                                    reasoning_trace: chunk.content,
+                                });
+                                return;
+                            }
+
+                            if (chunk.type === "token") {
+                                appendMessageChunk(moduleId, assistantId, chunk.content);
+                                return;
+                            }
+
+                            if (chunk.type === "done") {
+                                const blocked = chunk.policy_decisions?.some((p: PolicyDecision) => !p.allowed);
+                                patchMessage(moduleId, assistantId, {
+                                    module: chunk.module,
+                                    streaming: false,
+                                    latency_ms: chunk.latency_ms,
+                                    faithfulness_score: chunk.faithfulness_score ?? undefined,
+                                    reasoning_trace: chunk.reasoning_trace ?? undefined,
+                                    answer_text: chunk.answer_text ?? undefined,
+                                    policy_decisions: chunk.policy_decisions,
+                                    causal_graph: chunk.causal_graph ?? undefined,
+                                    tool_calls: chunk.tool_calls,
+                                    citations: chunk.citations ?? undefined,
+                                    attachments: chunk.attachments ?? undefined,
+                                    blocked,
+                                });
+                                if (chunk.causal_graph) {
+                                    setXrayGraphByModule(prev => ({ ...prev, [moduleId]: chunk.causal_graph }));
+                                    onXrayData(chunk.causal_graph);
+                                }
+                                setLoading(false);
+                                ws.close();
+                                resolve();
+                                return;
+                            }
+
+                            patchMessage(moduleId, assistantId, {
+                                content: `⚠️ ${chunk.content}`,
+                                streaming: false,
+                            });
+                            setLoading(false);
+                            ws.close();
+                            reject(new Error(chunk.content));
+                        },
+                        (event) => {
+                            reject(new Error(`WebSocket error: ${event.type}`));
+                        }
+                    );
+
+                    wsRef.current = ws;
+                    ws.onclose = () => {
+                        if (wsRef.current === ws) {
+                            wsRef.current = null;
+                        }
+                    };
+                    ws.onopen = () => {
+                        ws.send(JSON.stringify({
+                            session_id: currentSessionId,
+                            module: targetModule,
+                            message: text,
+                            xray_mode: xray,
+                            context: contextPayload,
+                        }));
+                    };
+                });
+                return;
+            }
 
             const res = await fetch("/api/v1/chat", {
                 method: "POST",
@@ -195,41 +320,51 @@ export function ChatPanel({
             if (onSessionCreated) onSessionCreated(data.session_id || currentSessionId);
 
             const blocked = data.policy_decisions?.some((p: PolicyDecision) => !p.allowed);
-            const aiMsg: Message = {
-                id: Date.now().toString() + "-ai",
-                role: "assistant",
+            patchMessage(moduleId, assistantId, {
                 content: data.response,
                 module: data.module,
+                streaming: false,
                 latency_ms: data.latency_ms,
                 faithfulness_score: data.faithfulness_score,
+                reasoning_trace: data.reasoning_trace ?? undefined,
+                answer_text: data.answer_text ?? undefined,
                 policy_decisions: data.policy_decisions,
                 causal_graph: data.causal_graph,
+                tool_calls: data.tool_calls,
+                citations: data.citations ?? undefined,
+                attachments: data.attachments ?? undefined,
                 blocked,
-            };
-
-            setMessagesByModule(prev => ({
-                ...prev,
-                [module]: [...(prev[module] || []), aiMsg]
-            }));
+            });
 
             if (data.causal_graph) {
-                setXrayGraphByModule(prev => ({ ...prev, [module]: data.causal_graph }));
+                setXrayGraphByModule(prev => ({ ...prev, [moduleId]: data.causal_graph }));
+                onXrayData(data.causal_graph);
             }
 
         } catch (err) {
-            setMessagesByModule(prev => ({
-                ...prev,
-                [module]: [...(prev[module] || []), {
-                    id: Date.now().toString() + "-err",
-                    role: "assistant",
-                    content: `⚠️ Could not reach backend: ${err}. Make sure the FastAPI server is running on port 8765.`,
-                    module,
-                }]
-            }));
+            patchMessage(moduleId, assistantId, {
+                content: `⚠️ Could not reach backend: ${err}. Make sure the FastAPI server is running on port 8765.`,
+                streaming: false,
+            });
         } finally {
             setLoading(false);
         }
-    }, [input, loading, module, xray, ragDocs, webSearchEnabled, deepReasoningEnabled, analyticsEnabled, currentSessionId, onSessionCreated]);
+    }, [
+        input,
+        loading,
+        module,
+        xray,
+        ragDocs,
+        webSearchEnabled,
+        deepReasoningEnabled,
+        analyticsEnabled,
+        currentSessionId,
+        onSessionCreated,
+        onXrayData,
+        streaming,
+        appendMessageChunk,
+        patchMessage,
+    ]);
 
     const onKey = (e: React.KeyboardEvent) => {
         if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -270,7 +405,7 @@ export function ChatPanel({
                             {messages.map(m => (
                                 <MessageBubble key={m.id} msg={m} showThinking={showThinking} />
                             ))}
-                            {loading && (
+                            {loading && !messages.some(m => m.streaming) && (
                                 <div className="message-row">
                                     <div className="avatar ai pulse">Æ</div>
                                     <div className="bubble ai" style={{ padding: "12px 16px" }}>

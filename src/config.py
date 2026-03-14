@@ -62,16 +62,15 @@ class AetherForgeSettings(BaseSettings):
     # 0.55–0.75 vs source chunks — 0.45 catches truly ungrounded responses only.
     # RAGForge module bypasses hard-blocking; SAMR-lite appends visible warnings instead.
     silicon_colosseum_min_faithfulness: float = Field(default=0.45, ge=0.0, le=1.0)
- 
-    # ── Vision Language Models (VLM) ──────────────────────────────
+
     # Apple Silicon Optimized VLM (mlx-vlm)
-    # Default path on external drive as requested by user.
-    apple_vlm_model_path: Path = Path("/Volumes/Apple/AI Model")
+    # Default is a placeholder; override via .env or settings.json
+    apple_vlm_model_path: Path = Path("./models/vision_model")
 
     # ── Web Grounding / Search ────────────────────────────────────
     web_search_provider: Literal["ddg", "searxng"] = Field(default="ddg")
     searxng_url: str = Field(default="http://localhost:8080")
- 
+
     # ── Storage ───────────────────────────────────────────────────
     data_dir: Path = Path("./data")
     replay_buffer_path: Path = Path("./data/replay_buffer.parquet")
@@ -82,30 +81,32 @@ class AetherForgeSettings(BaseSettings):
     langfuse_enabled: bool = False
     langfuse_host: str = "http://localhost:3000"
     langfuse_public_key: str = "af_local"
-    langfuse_secret_key: str = "af_local_secret"
+    langfuse_secret_key: str = Field(
+        default="af_local_secret", description="CHANGE THIS IN PRODUCTION"
+    )
 
     # ── Neo4j / X-Ray Causal Graph ────────────────────────────────
     neo4j_enabled: bool = False
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "aetherforge123"
+    neo4j_password: str = Field(default="aetherforge123", description="CHANGE THIS IN PRODUCTION")
 
     # ── Nightly OPLoRA Scheduler ──────────────────────────────────
     # Fires at 3:00 AM local time if battery > 30%
-    oploра_nightly_hour: int = Field(default=3, ge=0, le=23)
-    oploра_nightly_minute: int = Field(default=0, ge=0, le=59)
-    oploра_min_battery_pct: int = Field(default=30, ge=0, le=100)
+    oplora_nightly_hour: int = Field(default=3, ge=0, le=23)
+    oplora_nightly_minute: int = Field(default=0, ge=0, le=59)
+    oplora_min_battery_pct: int = Field(default=30, ge=0, le=100)
 
     # ── OPLoRA Hyperparameters ────────────────────────────────────
     # rank_k: number of singular vectors to preserve from past tasks.
     # A higher rank_k → more past knowledge preserved, but less
     # capacity for new knowledge. 64 is a good default for 2B models.
-    oploра_rank_k: int = Field(default=64, ge=4, le=512)
-    oploра_lora_r: int = Field(default=16, ge=1, le=256)
-    oploра_lora_alpha: float = Field(default=32.0, ge=1.0)
-    oploра_lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
-    oploра_learning_rate: float = Field(default=1e-4, gt=0.0)
-    oploра_epochs: int = Field(default=3, ge=1, le=50)
+    oplora_rank_k: int = Field(default=64, ge=4, le=512)
+    oplora_lora_r: int = Field(default=16, ge=1, le=256)
+    oplora_lora_alpha: float = Field(default=32.0, ge=1.0)
+    oplora_lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
+    oplora_learning_rate: float = Field(default=1e-4, gt=0.0)
+    oplora_epochs: int = Field(default=3, ge=1, le=50)
 
     # ── Validators ────────────────────────────────────────────────
     @field_validator("bitnet_model_path", "data_dir", "chroma_path", mode="before")
@@ -124,11 +125,29 @@ class AetherForgeSettings(BaseSettings):
     def api_base_url(self) -> str:
         return f"http://{self.aetherforge_host}:{self.aetherforge_port}"
 
+    @computed_field  # type: ignore[misc]
+    @property
+    def live_folder(self) -> Path:
+        return self.data_dir / "LiveFolder"
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def uploads_dir(self) -> Path:
+        return self.data_dir / "uploads"
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def generated_dir(self) -> Path:
+        return self.data_dir / "generated"
+
     def ensure_data_dirs(self) -> None:
         """Create required data directories if they don't exist."""
         for p in [
             self.data_dir,
             self.chroma_path,
+            self.live_folder,
+            self.uploads_dir,
+            self.generated_dir,
             self.data_dir / "replay",
             self.data_dir / "sessions",
             self.data_dir / "logs",

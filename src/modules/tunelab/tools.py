@@ -1,13 +1,15 @@
 # AetherForge v1.0 — src/modules/tunelab/tools.py
-import json
-import structlog
-import threading
 import asyncio
+import json
+import threading
 from typing import Any
+
+import structlog
 
 from src.learning.replay_buffer import ReplayBuffer
 
 logger = structlog.get_logger("aetherforge.tunelab.tools")
+
 
 def get_tools() -> list[dict[str, Any]]:
     """Return TuneLab-specific LLM tool definitions."""
@@ -20,11 +22,7 @@ def get_tools() -> list[dict[str, Any]]:
                 "CALL THIS IMMEDIATELY when the user asks: how many are ready, how full is the buffer, "
                 "what is the training queue size, or any question about sample counts or training status."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
             "name": "trigger_compilation",
@@ -32,13 +30,10 @@ def get_tools() -> list[dict[str, Any]]:
                 "Trigger an immediate OPLoRA compilation cycle to learn from the Replay Buffer. "
                 "CALL THIS when the user says: compile, train, trigger, start, run, or begin the OPLoRA/training cycle."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
     ]
+
 
 def execute_tool(name: str, args: dict[str, Any], state: Any) -> str:
     """Execute a TuneLab tool and return string result."""
@@ -46,16 +41,19 @@ def execute_tool(name: str, args: dict[str, Any], state: Any) -> str:
 
     if name == "trigger_compilation":
         from src.learning.bitnet_trainer import BitNetTrainer
+
         trainer = BitNetTrainer(state.settings, state.replay_buffer)
 
         def _run_trigger() -> None:
             asyncio.run(trainer.run_oploora_cycle())
 
         threading.Thread(target=_run_trigger, daemon=True).start()
-        return json.dumps({
-            "status": "started",
-            "message": "OPLoRA compilation pipeline triggered successfully. The training cycle is running in the background."
-        })
+        return json.dumps(
+            {
+                "status": "started",
+                "message": "OPLoRA compilation pipeline triggered successfully. The training cycle is running in the background.",
+            }
+        )
 
     elif name == "query_buffer_stats":
         replay_buffer: ReplayBuffer = state.replay_buffer

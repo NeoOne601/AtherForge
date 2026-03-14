@@ -9,11 +9,15 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import uuid
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Generator
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import structlog
+    from src.config import AetherForgeSettings # Keep for type hinting
+from src.config import get_settings # Added as per instruction
+
+import structlog # Moved here from inside TYPE_CHECKING block, as it's used at runtime
 
 logger = structlog.get_logger("aetherforge.telemetry")
 
@@ -24,7 +28,7 @@ class LangfuseExporter:
     Gracefully disabled when Langfuse is not configured or reachable.
     """
 
-    def __init__(self, settings: Any) -> None:
+    def __init__(self, settings: AetherForgeSettings) -> None:
         self.settings = settings
         self._client: Any = None
         self._enabled = settings.langfuse_enabled
@@ -36,6 +40,7 @@ class LangfuseExporter:
             return
         try:
             from langfuse import Langfuse  # type: ignore[import]
+
             self._client = Langfuse(
                 public_key=self.settings.langfuse_public_key,
                 secret_key=self.settings.langfuse_secret_key,
@@ -79,11 +84,19 @@ class LangfuseExporter:
                 },
                 tags=["aetherforge", f"module:{module}"],
             )
+            # Apply string slicing for prompt and completion
+            display_prompt = prompt
+            if len(display_prompt) > 500:
+                display_prompt = str(display_prompt)[:500] + "..."
+            display_completion = response
+            if len(display_completion) > 500:
+                display_completion = str(display_completion)[:500] + "..."
+
             trace.generation(
                 name="llm_generation",
                 model="BitNet-1.58b",
-                prompt=prompt[:2000],
-                completion=response[:2000],
+                prompt=display_prompt,
+                completion=display_completion,
                 usage={
                     "promptTokens": len(prompt.split()),
                     "completionTokens": len(response.split()),

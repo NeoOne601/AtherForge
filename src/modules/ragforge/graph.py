@@ -8,8 +8,9 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 from typing import Any
+
+import structlog
 
 logger = structlog.get_logger("aetherforge.ragforge")
 
@@ -23,6 +24,7 @@ def _get_collection(chroma_path: str) -> Any:
     global _chroma_client, _collection
     if _collection is None:
         import chromadb
+
         _chroma_client = chromadb.PersistentClient(path=chroma_path)
         _collection = _chroma_client.get_or_create_collection(
             name="aetherforge_ragforge",
@@ -74,9 +76,12 @@ def run_ragforge(
         total_docs = col.count()
         if total_docs == 0:
             return {
-                "documents": [], "distances": [], "metadatas": [],
-                "count": 0, "samr": None,
-                "message": "Knowledge base is empty. Upload documents first."
+                "documents": [],
+                "distances": [],
+                "metadatas": [],
+                "count": 0,
+                "samr": None,
+                "message": "Knowledge base is empty. Upload documents first.",
             }
 
         results = col.query(
@@ -90,7 +95,9 @@ def run_ragforge(
 
         logger.info(
             "RAGForge retrieved %d chunks for query (len=%d) | top_distance=%.3f",
-            len(docs), len(query), min(distances) if distances else -1
+            len(docs),
+            len(query),
+            min(distances) if distances else -1,
         )
 
         # ── SAMR-lite: faithfulness check ─────────────────────────
@@ -137,6 +144,7 @@ def run_samr_check(
 
     try:
         from src.modules.ragforge.samr_lite import run_samr_lite
+
         return run_samr_lite(
             answer=answer,
             retrieved_docs=retrieved_docs,
@@ -159,6 +167,7 @@ def ingest_documents(
     For file-based ingestion, use ragforge_indexer.index_document() instead.
     """
     import uuid as uuid_mod
+
     col = _get_collection(chroma_path)
 
     if ids is None:

@@ -17,6 +17,7 @@ export interface ChatRequest {
     module: string;
     message: string;
     xray_mode: boolean;
+    protocol?: string;
     context?: Record<string, unknown>;
 }
 
@@ -29,13 +30,29 @@ export interface ChatResponse {
     policy_decisions: PolicyDecision[];
     causal_graph: CausalGraph | null;
     faithfulness_score: number | null;
+    reasoning_trace: string | null;
+    answer_text: string | null;
+    citations: ChatCitation[];
+    attachments: string[];
 }
 
 export interface ToolCall {
     name: string;
-    args: Record<string, unknown>;
+    args?: Record<string, unknown>;
+    arguments?: Record<string, unknown>;
     result?: unknown;
     latency_ms?: number;
+    attachments?: string[];
+    citations?: ChatCitation[];
+}
+
+export interface ChatCitation {
+    source: string;
+    page: number | string | null;
+    section: string | null;
+    snippet: string | null;
+    kind: string;
+    label?: string | null;
 }
 
 export interface PolicyDecision {
@@ -62,6 +79,7 @@ export interface CausalNode {
 export interface CausalEdge {
     source: string;
     target: string;
+    label?: string;
 }
 
 export interface ModuleInfo {
@@ -138,8 +156,23 @@ export async function sendChat(req: ChatRequest): Promise<ChatResponse> {
 // ── WebSocket streaming chat ──────────────────────────────────────
 
 export type StreamChunk =
+    | { type: "meta"; session_id: string; module: string }
+    | { type: "reasoning"; content: string }
     | { type: "token"; content: string }
-    | { type: "done"; latency_ms: number }
+    | {
+        type: "done";
+        session_id: string;
+        module: string;
+        latency_ms: number;
+        faithfulness_score: number | null;
+        policy_decisions: PolicyDecision[];
+        causal_graph: CausalGraph | null;
+        tool_calls: ToolCall[];
+        reasoning_trace: string | null;
+        answer_text: string | null;
+        citations: ChatCitation[];
+        attachments: string[];
+    }
     | { type: "error"; content: string };
 
 export function createChatSocket(
@@ -147,7 +180,7 @@ export function createChatSocket(
     onChunk: (chunk: StreamChunk) => void,
     onError?: (err: Event) => void
 ): WebSocket {
-    const ws = new WebSocket(`ws://127.0.0.1:8765/ws/chat/${sessionId}`);
+    const ws = new WebSocket(`ws://127.0.0.1:8765/api/v1/chat/${sessionId}`);
     ws.onmessage = (e) => {
         try {
             const chunk = JSON.parse(e.data) as StreamChunk;

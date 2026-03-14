@@ -25,16 +25,17 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import math
 from typing import Any
+
+import structlog
 
 logger = structlog.get_logger("aetherforge.ragforge.samr_lite")
 
 # Thresholds (tuned for CognitiveRAG chain-of-thought synthesized answers)
-GROUNDED_THRESHOLD = 0.55       # answer is grounded in sources
+GROUNDED_THRESHOLD = 0.55  # answer is grounded in sources
 LOW_CONFIDENCE_THRESHOLD = 0.30  # answer is questionable
-DEFAULT_DIMS = 384              # all-MiniLM-L6-v2 embedding dimensions
+DEFAULT_DIMS = 384  # all-MiniLM-L6-v2 embedding dimensions
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -83,8 +84,7 @@ def compute_faithfulness(
         }
 
     per_chunk = [
-        round(_cosine_similarity(answer_embedding, ctx_emb), 4)
-        for ctx_emb in context_embeddings
+        round(_cosine_similarity(answer_embedding, ctx_emb), 4) for ctx_emb in context_embeddings
     ]
     avg_score = round(sum(per_chunk) / len(per_chunk), 4)
     max_score = max(per_chunk)
@@ -121,7 +121,10 @@ def compute_faithfulness(
     if alert:
         logger.warning(
             "SAMR-lite %s: score=%.3f threshold=%.2f | %s",
-            verdict, effective_score, threshold, interpretation
+            verdict,
+            effective_score,
+            threshold,
+            interpretation,
         )
 
     return {
@@ -166,7 +169,9 @@ def run_samr_lite(
         result = compute_faithfulness(answer_emb, context_embs, threshold)
         logger.debug(
             "SAMR-lite complete | verdict=%s score=%.3f chunks=%d",
-            result["verdict"], result["faithfulness_score"], len(retrieved_docs)
+            result["verdict"],
+            result["faithfulness_score"],
+            len(retrieved_docs),
         )
         return result
 

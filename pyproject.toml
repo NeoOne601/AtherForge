@@ -23,22 +23,18 @@ dependencies = [
   "uvicorn[standard]>=0.30.0",
   "httpx>=0.27.0",
   "websockets>=12.0",
-
   # ── Pydantic v2 (strict type safety across the board) ──────────
   "pydantic>=2.7.0",
   "pydantic-settings>=2.3.0",
-
   # ── LangGraph / LangChain (local-first, no cloud required) ────
   "langgraph>=0.2.0",
   "langchain>=0.2.0",
   "langchain-community>=0.2.0",
   "langchain-core>=0.2.0",
-
   # ── Local LLM Inference (GGUF / BitNet) ───────────────────────
   # llama-cpp-python with Metal support for M1/M2
   # Install: CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python
   "llama-cpp-python>=0.2.80",
-
   # ── OPLoRA / Continual Learning Math ─────────────────────────
   # NumPy + SciPy for SVD-based orthogonal projections
   "numpy>=1.26.0",
@@ -46,17 +42,14 @@ dependencies = [
   "torch>=2.3.0",           # CPU/MPS for LoRA operations on M1
   "safetensors>=0.4.0",     # For loading/saving LoRA adapter weights
   "peft>=0.11.0",           # HuggingFace PEFT for LoRA integration
-
   # ── OPA / Guardrails (Silicon Colosseum) ──────────────────────
   "opa-python-client>=1.3.0",
   # python-statemachine for FSM enforcement
   "python-statemachine>=2.3.0",
-
   # ── Storage / Replay Buffer ───────────────────────────────────
   "pyarrow>=16.0.0",        # Parquet I/O for replay buffer
   "cryptography>=42.0.0",   # age-like encryption via Fernet
   "sqlcipher3>=0.5.0",      # Encrypted SQLite for session store
-
   # ── Observability / Telemetry ────────────────────────────────
   "langfuse>=3.0.0",        # Local Langfuse (self-hosted)
   "structlog>=24.0.0",
@@ -64,16 +57,12 @@ dependencies = [
   "opentelemetry-exporter-otlp>=1.25.0",
   "opentelemetry-instrumentation-fastapi>=0.46b0",
   "opentelemetry-instrumentation-logging>=0.46b0",
-
   # ── Vector DB (local RAG) ────────────────────────────────────
   "chromadb>=0.5.0",        # Embedded, no server required
-
   # ── DSPy for InsightForge novelty detection ──────────────────
   "dspy-ai>=2.4.0",
-
   # ── Web Search (MetaAgent) ───────────────────────────────────────
   "duckduckgo-search",
-
   # ── Utilities ────────────────────────────────────────────────
   "rich>=13.7.0",           # Pretty CLI output
   "typer>=0.12.0",          # CLI entrypoint
@@ -88,6 +77,13 @@ dependencies = [
   "seaborn>=0.13.0",
   "openpyxl>=3.1.0",         # Required for Excel support in pandas
   "headroom-ai>=0.1.0",
+  "zeroconf>=0.130.0",       # Local network discovery
+  "langchain-chroma>=0.1.0", # Chroma integration for LangChain
+  "langchain-huggingface>=0.1.0", # HF embeddings for LangChain
+  "watchdog>=6.0.0",         # Directory watching for StreamSync
+  "feedparser>=6.0.0",       # RSS parsing for StreamSync
+  "beautifulsoup4>=4.12.0",  # HTML parsing for web grounding
+  "requests>=2.31.0",        # Legacy HTTP for some modules
 ]
 
 [project.optional-dependencies]
@@ -127,7 +123,7 @@ plugins = ["pydantic.mypy"]
 # ── Pytest Config ────────────────────────────────────────────────
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "Test_related"]
 addopts = "--cov=src --cov-report=term-missing -v"
 
 # ── Coverage ────────────────────────────────────────────────────

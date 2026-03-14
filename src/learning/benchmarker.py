@@ -6,14 +6,13 @@
 # and convergence stability under current genome configurations.
 # ─────────────────────────────────────────────────────────────────
 
-import asyncio
+
 import structlog
-import time
-from typing import Any, Dict
 
 from src.learning.bitnet_trainer import BitNetTrainer
 
 logger = structlog.get_logger("aetherforge.bitnet_benchmarker")
+
 
 class BitNetBenchmarker:
     """
@@ -32,12 +31,11 @@ class BitNetBenchmarker:
         try:
             # We run a standard cycle. In a real benchmark, we'd use a fixed test set.
             result = await self.trainer.run_oploora_cycle()
-            
+
             # Metric for hill-climbing: Higher is better.
             # If BPB is typically 0.07, (1.0 - 0.07) = 0.93.
             metric = 1.0 - result.bpb
-            logger.info("BitNet Sprint complete. BPB: %.4f | Fit Metric: %.4f", 
-                        result.bpb, metric)
+            logger.info("BitNet Sprint complete. BPB: %.4f | Fit Metric: %.4f", result.bpb, metric)
             return metric
         except Exception as e:
             logger.error("BitNet Benchmark sprint failed: %s", e)

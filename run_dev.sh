@@ -84,7 +84,7 @@ if [[ "$FRONTEND_ONLY" == "false" ]]; then
     --reload-dir src \
     &
   PIDS+=($!)
-  ok "Backend started (PID ${PIDS[-1]})"
+  ok "Backend started (PID $!)"
   # Give it a moment to bind
   sleep 2
 fi
@@ -94,7 +94,7 @@ if [[ "$BACKEND_ONLY" == "false" ]]; then
   log "Starting Vite frontend dev server on http://localhost:1420..."
   npm run dev &
   PIDS+=($!)
-  ok "Frontend started (PID ${PIDS[-1]})"
+  ok "Frontend started (PID $!)"
   sleep 2
 fi
 

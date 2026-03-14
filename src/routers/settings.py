@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1", tags=["settings"])
@@ -137,6 +137,19 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "min": 64,
                 "max": 8192,
             },
+            "VISUAL_THEME": {
+                "label": "Visual Theme",
+                "description": "Choose the look and feel of the AetherForge interface",
+                "type": "select",
+                "options": [
+                    "Sovereign Dark",
+                    "Nordic Frost",
+                    "Neon Cyberpunk",
+                    "Monochrome Pro",
+                    "Forest Terminal",
+                ],
+                "default": "Sovereign Dark",
+            },
         },
     },
 }
@@ -146,7 +159,7 @@ def _load_saved_settings() -> dict[str, Any]:
     """Load user-saved settings from data/settings.json, or return empty dict."""
     if SETTINGS_FILE.exists():
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE) as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             return {}

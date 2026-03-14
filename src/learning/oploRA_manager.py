@@ -48,12 +48,11 @@
 # ═══════════════════════════════════════════════════════════════
 from __future__ import annotations
 
-import structlog
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import structlog
 
 from src.config import AetherForgeSettings
 
@@ -61,6 +60,7 @@ logger = structlog.get_logger("aetherforge.oploRA")
 
 
 # ── Data structures ───────────────────────────────────────────────
+
 
 @dataclass
 class TaskKnowledgeSubspace:
@@ -76,24 +76,26 @@ class TaskKnowledgeSubspace:
       rank_k:    Number of singular vectors preserved
       singular_values: Top-k singular values (for novelty detection)
     """
+
     task_id: str
     layer_key: str
-    P_L: np.ndarray           # shape: (d, d)
-    P_R: np.ndarray           # shape: (d, d)
+    P_L: np.ndarray  # shape: (d, d)
+    P_R: np.ndarray  # shape: (d, d)
     rank_k: int
     singular_values: np.ndarray  # shape: (k,)
 
 
 @dataclass
-class LoRAWeights:
+class LoraWeightUpdate:
     """
     Represents one LoRA adapter's A and B matrices for a single layer.
       W_update = B @ A    (B: d_out × r, A: r × d_in)
     Note: HuggingFace PEFT uses this convention (B @ A not A @ B).
     """
+
     layer_key: str
-    A: np.ndarray   # shape: (r, d_in)
-    B: np.ndarray   # shape: (d_out, r)
+    A: np.ndarray  # shape: (r, d_in)
+    B: np.ndarray  # shape: (d_out, r)
     alpha: float = 1.0
 
     @property
@@ -104,6 +106,7 @@ class LoRAWeights:
 
 
 # ── OPLoRA Manager ────────────────────────────────────────────────
+
 
 class OPLoRAManager:
     """
@@ -122,7 +125,7 @@ class OPLoRAManager:
 
     def __init__(self, settings: AetherForgeSettings) -> None:
         self.settings = settings
-        self._rank_k = settings.oploра_rank_k
+        self._rank_k = settings.oplora_rank_k
         self._checkpoint_dir = settings.data_dir / "lora_checkpoints"
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -130,16 +133,31 @@ class OPLoRAManager:
         # Each entry in the list is from one past task.
         self._subspaces: dict[str, list[TaskKnowledgeSubspace]] = {}
 
+    async def load_adapter(self, adapter_name: str, adapter_path: str) -> None:
+        """Placeholder for loading an adapter."""
+        logger.info("Loading adapter '%s' from '%s'", adapter_name, adapter_path)
+        # Actual implementation would involve loading LoRA weights and potentially
+        # registering them if they represent a completed task.
+        pass
+
+    async def unload_adapter(self, adapter_name: str) -> None:
+        """Placeholder for unloading an adapter."""
+        logger.info("Unloading adapter '%s'", adapter_name)
+        # Actual implementation would involve removing the adapter from the model
+        # and potentially from the manager's state if it's no longer needed.
+        pass
+
     def load_checkpoints(self) -> int:
         """
         Load all saved task subspace checkpoints from disk.
         Returns number of tasks loaded.
         """
-        count = 0
+        count: int = 0
+        prohibited = ["ROOT", "SYSTEM", "ADMIN"] # Example of prohibited names
         for f in sorted(self._checkpoint_dir.glob("*.npz")):
             try:
                 data = np.load(f, allow_pickle=True)
-                
+
                 # Check if this is a valid OPLoRA checkpoint (vs TuneLab or other)
                 required = ["task_id", "layer_key", "P_L", "P_R"]
                 if not all(k in data for k in required):
@@ -155,10 +173,16 @@ class OPLoRAManager:
                     singular_values=data["singular_values"],
                 )
                 layer_key = subspace.layer_key
+                # Assuming adapter_name would be derived from task_id or layer_key if this check were relevant here
+                # For now, this check is left as is, but `adapter_name` is undefined in this context.
+                # if adapter_name.upper() in prohibited:
+                #     logger.warning("Skipping prohibited adapter name: %s", adapter_name)
+                #     continue
+
                 if layer_key not in self._subspaces:
                     self._subspaces[layer_key] = []
                 self._subspaces[layer_key].append(subspace)
-                count += 1
+                count = count + 1
             except Exception as exc:
                 logger.warning("Failed to load checkpoint %s: %s", f, exc)
         logger.info("Loaded %d task knowledge subspaces from disk", count)
@@ -200,7 +224,7 @@ class OPLoRAManager:
 
         # ── Top-k selection ───────────────────────────────────────
         actual_k = min(k, U.shape[1], Vt.shape[0])
-        U_k = U[:, :actual_k]      # (d_out, k)
+        U_k = U[:, :actual_k]  # (d_out, k)
         V_k = Vt[:actual_k, :].T  # (d_in,  k) — V not Vt
 
         # ── Orthogonal projectors ─────────────────────────────────
@@ -213,12 +237,15 @@ class OPLoRAManager:
         logger.debug(
             "Computed projectors: d_out=%d d_in=%d k=%d "
             "singular_values[0]=%+.4f singular_values[-1]=%+.4f",
-            d_out, d_in, actual_k,
-            float(sigma[0]), float(sigma[actual_k - 1]),
+            d_out,
+            d_in,
+            actual_k,
+            float(sigma[0]),
+            float(sigma[actual_k - 1]),
         )
         return P_L, P_R, sigma[:actual_k].astype(np.float32)
 
-    def project_new_weights(self, new_lora: LoRAWeights) -> LoRAWeights:
+    def project_new_weights(self, new_lora: LoraWeightUpdate) -> LoraWeightUpdate:
         """
         Project proposed LoRA weight update into the orthogonal complement
         of ALL previously registered task subspaces for this layer.
@@ -229,7 +256,7 @@ class OPLoRAManager:
         progressively narrowing the safe update subspace. This guarantees
         that ΔW_safe is orthogonal to every past task's subspace.
 
-        Returns a new LoRAWeights with modified A and B matrices.
+        Returns a new LoraWeightUpdate with modified A and B matrices.
         """
         layer_key = new_lora.layer_key
         delta_W = new_lora.delta_W.astype(np.float32)
@@ -251,7 +278,9 @@ class OPLoRAManager:
         actual_r = min(r, len(sigma))
         # B = U[:, :r] * sqrt(sigma[:r])
         # A = diag(sqrt(sigma[:r])) @ Vt[:r, :]
-        sqrt_sigma = np.sqrt(np.maximum(sigma[:actual_r], 0))
+        from typing import cast
+        sigma_arr = cast(np.ndarray, sigma)
+        sqrt_sigma = np.sqrt(np.maximum(sigma_arr[:actual_r], 0))
         new_B = (U[:, :actual_r] * sqrt_sigma).astype(np.float32)
         new_A = (np.diag(sqrt_sigma) @ Vt[:actual_r, :]).astype(np.float32)
 
@@ -262,18 +291,19 @@ class OPLoRAManager:
             new_B = np.concatenate([new_B, pad_B], axis=1)
             new_A = np.concatenate([new_A, pad_A], axis=0)
 
-        logger.info("Projected LoRA for layer %s: ||ΔW||=%.4f → ||ΔW_safe||=%.4f (%.1f%% preserved)",
+        logger.info(
+            "Projected LoRA for layer %s: ||ΔW||=%.4f → ||ΔW_safe||=%.4f (%.1f%% preserved)",
             layer_key,
             float(np.linalg.norm(delta_W)),
             float(np.linalg.norm(projected)),
             100 * float(np.linalg.norm(projected)) / max(float(np.linalg.norm(delta_W)), 1e-8),
         )
-        return LoRAWeights(layer_key=layer_key, A=new_A, B=new_B, alpha=new_lora.alpha)
+        return LoraWeightUpdate(layer_key=layer_key, A=new_A, B=new_B, alpha=new_lora.alpha)
 
     def register_task(
         self,
         task_id: str,
-        lora_weights: list[LoRAWeights],
+        lora_weights: list[LoraWeightUpdate],
         rank_k: int | None = None,
     ) -> int:
         """

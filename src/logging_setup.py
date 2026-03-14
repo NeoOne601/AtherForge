@@ -1,27 +1,30 @@
-import logging
 import asyncio
-import structlog
+import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+import structlog
 
 # Global queue for UI log streaming
 LOG_QUEUE: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
+
 
 class LogQueueHandler(logging.Handler):
     """
     Custom logging handler that pushes records to an asyncio.Queue.
     The Logger module (via WebSocket) consumes from this queue.
     """
-    def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+
+    def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         super().__init__()
         self.loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             # Check if this record has 'structlog' context
-            # ProcessorFormatter adds 'event' and other fields to the message 
+            # ProcessorFormatter adds 'event' and other fields to the message
             # or record actually.
             entry = {
                 "timestamp": record.created,
@@ -29,9 +32,13 @@ class LogQueueHandler(logging.Handler):
                 "module": record.module,
                 "message": record.getMessage(),
             }
-            
+
             # If it's a structlog record, it might have been formatted already
-            if hasattr(record, "msg") and isinstance(record.msg, str) and record.msg.startswith("{"):
+            if (
+                hasattr(record, "msg")
+                and isinstance(record.msg, str)
+                and record.msg.startswith("{")
+            ):
                 # Potential JSON log from structlog
                 pass
 
@@ -39,6 +46,7 @@ class LogQueueHandler(logging.Handler):
                 self.loop.call_soon_threadsafe(LOG_QUEUE.put_nowait, entry)
         except Exception:
             pass
+
 
 def setup_logging(env: str = "development"):
     shared_processors = [
@@ -70,7 +78,7 @@ def setup_logging(env: str = "development"):
 
     # Standard logging bridge — console handler
     handler = logging.StreamHandler(sys.stdout)
-    
+
     if env == "production":
         formatter = structlog.stdlib.ProcessorFormatter(
             processor=structlog.processors.JSONRenderer(),
@@ -79,13 +87,13 @@ def setup_logging(env: str = "development"):
         formatter = structlog.stdlib.ProcessorFormatter(
             processor=structlog.dev.ConsoleRenderer(colors=True),
         )
-    
+
     handler.setFormatter(formatter)
 
     root = logging.getLogger()
     for h in root.handlers[:]:
         root.removeHandler(h)
-        
+
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
@@ -107,9 +115,9 @@ def setup_logging(env: str = "development"):
     # Add our custom queue handler for the UI
     queue_handler = LogQueueHandler()
     root.addHandler(queue_handler)
-    
+
     # Silence some noisy loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    
+
     return queue_handler

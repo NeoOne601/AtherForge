@@ -1,29 +1,25 @@
 from __future__ import annotations
 
 import random
-import structlog
 from typing import Any
 
-from src.modules.base import BaseModule
+import structlog
+
 from src.config import AetherForgeSettings
+from src.modules.base import BaseModule
 
 logger = structlog.get_logger("aetherforge.modules.core")
 
 # Curated AI jokes so the model never needs to invent one.
 _AI_JOKES = [
-    "Why did the neural network go to therapy? "
-    "It had too many unresolved layers.",
-    "Why do programmers prefer dark mode? "
-    "Because light attracts bugs.",
+    "Why did the neural network go to therapy? It had too many unresolved layers.",
+    "Why do programmers prefer dark mode? Because light attracts bugs.",
     "An AI walked into a bar. The bartender said, "
     "'We don't serve your kind here.' The AI replied, "
     "'But I'm fully aligned!'",
-    "How does an AI break up with you? "
-    "'It's not you, it's my training data.'",
-    "Why was the transformer model so popular? "
-    "Because it always paid attention.",
-    "What did GPT say to BERT? "
-    "'You only look once? That's so YOLO.'",
+    "How does an AI break up with you? 'It's not you, it's my training data.'",
+    "Why was the transformer model so popular? Because it always paid attention.",
+    "What did GPT say to BERT? 'You only look once? That's so YOLO.'",
 ]
 
 
@@ -34,9 +30,28 @@ class CoreModule(BaseModule):
         super().__init__(name="core")
         self.settings = settings
 
+    @property
+    def system_prompt_extension(self) -> str:
+        return (
+            "\n\nYou have access to system-level tools for web search, weather, and "
+            "humor. Use them when appropriate to provide real-time data or a helpful tone."
+        )
+
     async def initialize(self) -> None:
         pass
 
+    async def process(self, payload: dict[str, Any], state: Any = None) -> dict[str, Any]:
+        """
+        Execute core system logic.
+        For now, this is a pass-through to the tool execution loop.
+        """
+        return {
+            "content": "[CoreModule] Protocol initialized. Awaiting tool dispatch.",
+            "metadata": {},
+            "causal_edges": [
+                {"source": "core_start", "target": "ready", "label": "Protocol Initialized"}
+            ],
+        }
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
             {
@@ -50,10 +65,7 @@ class CoreModule(BaseModule):
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": (
-                                "The search query to look up "
-                                "on the internet."
-                            ),
+                            "description": ("The search query to look up on the internet."),
                         },
                     },
                     "required": ["query"],
@@ -70,10 +82,7 @@ class CoreModule(BaseModule):
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description": (
-                                "City and country or a "
-                                "well-known place name."
-                            ),
+                            "description": ("City and country or a well-known place name."),
                         },
                     },
                     "required": ["location"],
@@ -123,9 +132,7 @@ class CoreModule(BaseModule):
                 if not results:
                     return "No results found on the internet."
                 chunks = [
-                    f"Source: {r.get('href')}\n"
-                    f"Title: {r.get('title')}\n"
-                    f"Snippet: {r.get('body')}"
+                    f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}"
                     for r in results
                 ]
                 return "\n\n".join(chunks)
@@ -149,17 +156,11 @@ class CoreModule(BaseModule):
                 geo = geo_resp.json()
                 results = geo.get("results") or []
                 if not results:
-                    return (
-                        f"Weather lookup failed: could not "
-                        f"resolve location '{location}'."
-                    )
+                    return f"Weather lookup failed: could not resolve location '{location}'."
                 place = results[0]
                 lat = place.get("latitude")
                 lon = place.get("longitude")
-                resolved_name = (
-                    f"{place.get('name', '')}, "
-                    f"{place.get('country', '')}"
-                ).strip(", ")
+                resolved_name = (f"{place.get('name', '')}, {place.get('country', '')}").strip(", ")
                 wx_resp = client.get(
                     "https://api.open-meteo.com/v1/forecast",
                     params={

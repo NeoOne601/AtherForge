@@ -6,11 +6,12 @@
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import structlog
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
+
+import structlog
 
 logger = structlog.get_logger("aetherforge.streamsync")
 
@@ -22,6 +23,7 @@ _PATTERN_REGISTRY: dict[str, list[str]] = {}  # pattern_name → [event sequence
 @dataclass
 class StreamEvent:
     """A single event in the stream."""
+
     event_type: str
     payload: dict[str, Any] = field(default_factory=dict)
     source: str = "unknown"
@@ -42,6 +44,7 @@ def build_streamsync_graph() -> dict[str, Any]:
 def emit_event(event_type: str, payload: dict[str, Any] | None = None, source: str = "api") -> str:
     """Emit a single event into the stream. Returns event ID."""
     import uuid
+
     event_id = str(uuid.uuid4())
     event: dict[str, Any] = {
         "id": event_id,
@@ -72,14 +75,16 @@ def _detect_patterns(window: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for pattern_name, sequence in _PATTERN_REGISTRY.items():
         k = len(sequence)
         for i in range(len(event_types) - k + 1):
-            if event_types[i:i + k] == sequence:
-                matches.append({
-                    "pattern": pattern_name,
-                    "start_idx": i,
-                    "end_idx": i + k - 1,
-                    "start_ts": window[i]["timestamp"],
-                    "end_ts": window[i + k - 1]["timestamp"],
-                })
+            if event_types[i : i + k] == sequence:
+                matches.append(
+                    {
+                        "pattern": pattern_name,
+                        "start_idx": i,
+                        "end_idx": i + k - 1,
+                        "start_ts": window[i]["timestamp"],
+                        "end_ts": window[i + k - 1]["timestamp"],
+                    }
+                )
     return matches
 
 

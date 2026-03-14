@@ -1,12 +1,13 @@
 # AetherForge v1.0 — src/modules/watchtower/tools.py
 import json
-import structlog
-import os
 from typing import Any
+
+import structlog
 
 from src.modules.watchtower.graph import _METRIC_WINDOWS, _Z_THRESHOLD
 
 logger = structlog.get_logger("aetherforge.watchtower.tools")
+
 
 def get_tools() -> list[dict[str, Any]]:
     """Return WatchTower-specific LLM tool definitions."""
@@ -25,11 +26,11 @@ def get_tools() -> list[dict[str, Any]]:
                     "metric_name": {
                         "type": "string",
                         "enum": ["cpu", "mem", "net"],
-                        "description": "The metric to query: 'cpu' for CPU%, 'mem' for memory%, 'net' for network MB/s"
+                        "description": "The metric to query: 'cpu' for CPU%, 'mem' for memory%, 'net' for network MB/s",
                     }
                 },
-                "required": ["metric_name"]
-            }
+                "required": ["metric_name"],
+            },
         },
         {
             "name": "get_top_processes",
@@ -45,11 +46,11 @@ def get_tools() -> list[dict[str, Any]]:
                     "sort_by": {
                         "type": "string",
                         "enum": ["memory", "cpu"],
-                        "description": "Sort by 'memory' or 'cpu' usage"
+                        "description": "Sort by 'memory' or 'cpu' usage",
                     }
                 },
-                "required": ["sort_by"]
-            }
+                "required": ["sort_by"],
+            },
         },
         {
             "name": "kill_process",
@@ -63,13 +64,14 @@ def get_tools() -> list[dict[str, Any]]:
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "The name or PID of the process to kill (e.g., 'python_worker_3', '1234')"
+                        "description": "The name or PID of the process to kill (e.g., 'python_worker_3', '1234')",
                     }
                 },
-                "required": ["target"]
-            }
-        }
+                "required": ["target"],
+            },
+        },
     ]
+
 
 def execute_tool(name: str, args: dict[str, Any]) -> str:
     """Execute a WatchTower tool and return string result."""
@@ -79,7 +81,6 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
         metric = args.get("metric_name", "")
         if metric not in _METRIC_WINDOWS or not _METRIC_WINDOWS[metric]:
             return f"No data collected yet for metric '{metric}'. Send some metrics via the /api/v1/events endpoint first."
-        import numpy as np
         arr = _METRIC_WINDOWS[metric]
         vals = list(arr)
         np_arr = __import__("numpy").array(vals, dtype=float)
@@ -106,16 +107,19 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
         sort_by = args.get("sort_by", "memory")
         try:
             import psutil
+
             procs = []
             for p in psutil.process_iter(["pid", "name", "memory_percent", "cpu_percent"]):
                 try:
                     info = p.info
-                    procs.append({
-                        "pid": info["pid"],
-                        "name": info["name"] or "unknown",
-                        "memory_pct": round(info.get("memory_percent") or 0.0, 2),
-                        "cpu_pct": round(info.get("cpu_percent") or 0.0, 2),
-                    })
+                    procs.append(
+                        {
+                            "pid": info["pid"],
+                            "name": info["name"] or "unknown",
+                            "memory_pct": round(info.get("memory_percent") or 0.0, 2),
+                            "cpu_pct": round(info.get("cpu_percent") or 0.0, 2),
+                        }
+                    )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             key = "memory_pct" if sort_by == "memory" else "cpu_pct"
@@ -136,11 +140,13 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
         target = args.get("target", "unknown")
         # In a real environment, we'd os.kill(int(target), 9) if PID, or find by name
         # For safety, this is simulated with a success confirmation
-        return json.dumps({
-            "status": "success",
-            "action": "SIGKILL",
-            "target": target,
-            "message": f"Process '{target}' terminated. Mitigation registered in WatchTower incident log.",
-        })
+        return json.dumps(
+            {
+                "status": "success",
+                "action": "SIGKILL",
+                "target": target,
+                "message": f"Process '{target}' terminated. Mitigation registered in WatchTower incident log.",
+            }
+        )
 
     return f"Error: Tool '{name}' not found in WatchTower context."

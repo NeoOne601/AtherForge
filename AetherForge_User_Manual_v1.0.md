@@ -687,7 +687,7 @@ async def nightly_oploRA_job():
 
 ### 3. OPLoRA Projection Math
 
-The core algorithm (in `src/learning/oploRA_manager.py::compute_projectors()`):
+The core algorithm (in `src/learning/oplora_manager.py::compute_projectors()`):
 
 ```python
 # Economy SVD of the accumulated task weight update
@@ -706,7 +706,7 @@ P_R = np.eye(d_in)  - (V_k @ V_k.T)   # (d_in,  d_in)
 ```
 U_kᵀ @ (P_L @ ΔW_new @ P_R) ≈ 0
 ```
-Any new update projected through `P_L` and `P_R` is provably orthogonal to the past knowledge subspace. The tests in `tests/test_oploRA_manager.py::test_projection_nullifies_past_subspace()` validate this numerically.
+Any new update projected through `P_L` and `P_R` is provably orthogonal to the past knowledge subspace. The tests in `tests/test_oplora_manager.py::test_projection_nullifies_past_subspace()` validate this numerically.
 
 ### 4. Checkpoint Persistence
 After each training run, compressed numpy checkpoints are saved:
@@ -840,7 +840,7 @@ source .venv/bin/activate
 pytest tests/ -v
 
 # Run only math validation tests
-pytest tests/test_oploRA_manager.py -v -k "test_projection"
+pytest tests/test_oplora_manager.py -v -k "test_projection"
 
 # Run with coverage
 pytest tests/ --cov=src --cov-report=term-missing
@@ -849,7 +849,7 @@ pytest tests/ --cov=src --cov-report=term-missing
 pytest tests/test_replay_buffer.py -v
 ```
 
-Test `test_oploRA_manager.py::TestProjectorMath::test_projection_nullifies_past_subspace` is the most important — it numerically validates the core anti-forgetting guarantee.
+Test `test_oplora_manager.py::TestProjectorMath::test_projection_nullifies_past_subspace` is the most important — it numerically validates the core anti-forgetting guarantee.
 
 ---
 

@@ -20,14 +20,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import structlog
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import structlog
 
 logger = structlog.get_logger("aetherforge.insight_forge")
 
@@ -35,15 +35,14 @@ logger = structlog.get_logger("aetherforge.insight_forge")
 @dataclass
 class Insight:
     """A synthesized insight from detected novel knowledge clusters."""
+
     insight_id: str
     title: str
     summary: str
-    novelty_score: float               # 0.0 (known) → 1.0 (highly novel)
-    supporting_records: list[str]      # replay buffer record IDs
-    topics: list[str]                  # Extracted key topics
-    generated_at: str = field(
-        default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
-    )
+    novelty_score: float  # 0.0 (known) → 1.0 (highly novel)
+    supporting_records: list[str]  # replay buffer record IDs
+    topics: list[str]  # Extracted key topics
+    generated_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__
@@ -69,6 +68,7 @@ class InsightForge:
         Returns list of newly generated insights.
         """
         import asyncio
+
         t0 = time.perf_counter()
         logger.info("InsightForge weekly cycle starting...")
 
@@ -79,10 +79,7 @@ class InsightForge:
             return []
 
         # ── 2. TF-IDF vectorization ───────────────────────────────
-        texts = [
-            f"{s.get('prompt', '')} {s.get('response', '')}".strip()
-            for s in samples
-        ]
+        texts = [f"{s.get('prompt', '')} {s.get('response', '')}".strip() for s in samples]
         vectors, vocab = await asyncio.get_event_loop().run_in_executor(
             None, self._tfidf_vectorize, texts
         )
@@ -113,9 +110,7 @@ class InsightForge:
         )
         return insights
 
-    def _tfidf_vectorize(
-        self, texts: list[str]
-    ) -> tuple[np.ndarray, dict[str, int]]:
+    def _tfidf_vectorize(self, texts: list[str]) -> tuple[np.ndarray, dict[str, int]]:
         """
         Simple TF-IDF vectorizer (no sklearn needed).
         Returns (matrix, vocab) where matrix is (N × V) float32.
@@ -124,17 +119,34 @@ class InsightForge:
         from collections import Counter
 
         # Tokenize
-        tokenized = [
-            re.findall(r"\b[a-z]{3,}\b", t.lower())
-            for t in texts
-        ]
+        tokenized = [re.findall(r"\b[a-z]{3,}\b", t.lower()) for t in texts]
 
         # Build vocab from top-500 terms
         all_words = [w for doc in tokenized for w in doc]
         vocab_counts = Counter(all_words)
         # Exclude stop words
-        STOP = {"the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
-                 "i", "you", "it", "that", "this", "for", "to", "of", "in", "on"}
+        STOP = {
+            "the",
+            "a",
+            "an",
+            "and",
+            "or",
+            "but",
+            "is",
+            "are",
+            "was",
+            "were",
+            "i",
+            "you",
+            "it",
+            "that",
+            "this",
+            "for",
+            "to",
+            "of",
+            "in",
+            "on",
+        }
         vocab_words = [w for w, _ in vocab_counts.most_common(500) if w not in STOP]
         vocab = {w: i for i, w in enumerate(vocab_words)}
 
@@ -187,8 +199,10 @@ class InsightForge:
 
         # Extract key topics (simplified — production: use NER/KeyBERT)
         import re
+
         words = re.findall(r"\b[A-Za-z]{5,}\b", text)
         from collections import Counter
+
         top_words = [w for w, _ in Counter(words).most_common(5)]
 
         insight_id = hashlib.md5(text[:200].encode()).hexdigest()[:12]

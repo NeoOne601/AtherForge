@@ -5,22 +5,23 @@ import urllib.parse
 from logging import getLogger
 from typing import Any
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = getLogger("aetherforge.sync.crypto")
+
 
 class SyncCrypto:
     """
     Handles End-to-End Encryption (E2EE) for AetherForge multi-node syncing.
     Uses AES-256-GCM for authenticated encryption.
     """
-    
+
     @staticmethod
     def generate_key() -> str:
         """Generates a secure, random 256-bit AES key, encoded as base64."""
         key_bytes = AESGCM.generate_key(bit_length=256)
-        return base64.urlsafe_b64encode(key_bytes).decode('utf-8')
+        return base64.urlsafe_b64encode(key_bytes).decode("utf-8")
 
     @staticmethod
     def encrypt_payload(payload: dict[str, Any], key_b64: str) -> str:
@@ -30,16 +31,16 @@ class SyncCrypto:
         """
         key = base64.urlsafe_b64decode(key_b64)
         aesgcm = AESGCM(key)
-        
+
         nonce = os.urandom(12)
-        plaintext = json.dumps(payload).encode('utf-8')
-        
+        plaintext = json.dumps(payload).encode("utf-8")
+
         # Authenticated encryption
         ciphertext = aesgcm.encrypt(nonce, plaintext, associated_data=None)
-        
+
         # Prepend nonce to ciphertext for the decryptor and base64 encode
         combined = nonce + ciphertext
-        return base64.urlsafe_b64encode(combined).decode('utf-8')
+        return base64.urlsafe_b64encode(combined).decode("utf-8")
 
     @staticmethod
     def decrypt_payload(encrypted_b64: str, key_b64: str) -> dict[str, Any]:
@@ -49,14 +50,14 @@ class SyncCrypto:
         """
         key = base64.urlsafe_b64decode(key_b64)
         aesgcm = AESGCM(key)
-        
+
         combined = base64.urlsafe_b64decode(encrypted_b64)
         nonce = combined[:12]
         ciphertext = combined[12:]
-        
+
         try:
             plaintext = aesgcm.decrypt(nonce, ciphertext, associated_data=None)
-            return json.loads(plaintext.decode('utf-8'))
+            return json.loads(plaintext.decode("utf-8"))
         except InvalidTag:
             logger.error("E2EE Decryption failed: Invalid tag (wrong key or tampered data)")
             raise ValueError("Decryption failed due to invalid tag or key.")
@@ -70,12 +71,7 @@ class SyncCrypto:
         Constructs the AetherForge specific URI format for QR codes.
         Format: aetherforge://sync?ip=...&port=...&node=...&key=...
         """
-        params = {
-            "ip": ip,
-            "port": str(port),
-            "node": node_id,
-            "key": key_b64
-        }
+        params = {"ip": ip, "port": str(port), "node": node_id, "key": key_b64}
         query = urllib.parse.urlencode(params)
         return f"aetherforge://sync?{query}"
 
@@ -88,14 +84,14 @@ class SyncCrypto:
         parsed = urllib.parse.urlparse(uri)
         if parsed.scheme != "aetherforge" or parsed.netloc != "sync":
             raise ValueError("Invalid pairing URI schema")
-            
+
         qs = urllib.parse.parse_qs(parsed.query)
         try:
             return {
                 "ip": qs["ip"][0],
                 "port": int(qs["port"][0]),
                 "node_id": qs["node"][0],
-                "key": qs["key"][0]
+                "key": qs["key"][0],
             }
         except KeyError as e:
             raise ValueError(f"Missing required parameter in URI: {e}")

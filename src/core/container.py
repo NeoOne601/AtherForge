@@ -1,23 +1,26 @@
 from __future__ import annotations
-import asyncio
-import structlog
-from typing import Any, Dict, Optional, List
 
-from src.config import get_settings, AetherForgeSettings
+from typing import Any
+
+import structlog
+
+from src.config import AetherForgeSettings, get_settings
 
 logger = structlog.get_logger("aetherforge.core.container")
+
 
 class Container:
     """
     Central dependency injection and lifecycle container for AetherForge.
     Enables better modularity and testability by managing component creation and wiring.
     """
-    _instance: Optional[Container] = None
+
+    _instance: Container | None = None
 
     def __init__(self) -> None:
         if not hasattr(self, "_initialized"):
-            self._services: Dict[str, Any] = {}
-            self._modules: Dict[str, Any] = {}
+            self._services: dict[str, Any] = {}
+            self._modules: dict[str, Any] = {}
             self.settings: AetherForgeSettings = get_settings()
             self._initialized = True
 
@@ -35,15 +38,20 @@ class Container:
 
     async def initialize_all(self, app_state: Any) -> None:
         """Initialize all core services and wire them together."""
-        from src.learning.replay_buffer import ReplayBuffer
-        from src.learning.history_manager import HistoryManager
-        from src.guardrails.silicon_colosseum import SiliconColosseum
-        from src.modules.session_store import SessionStore
-        from src.modules.export_engine import ExportEngine
-        from src.meta_agent import MetaAgent
+        import uuid
+
         from langchain_chroma import Chroma
         from langchain_huggingface import HuggingFaceEmbeddings
+
+        from src.guardrails.silicon_colosseum import SiliconColosseum
+        from src.learning.history_manager import HistoryManager
+        from src.learning.replay_buffer import ReplayBuffer
+        from src.meta_agent import MetaAgent
+        from src.modules.export_engine import ExportEngine
         from src.modules.ragforge.sparse_index import SparseIndex
+        from src.modules.session_store import SessionStore
+        from src.modules.sync.event_log import EventLog
+        from src.modules.sync.sync_manager import SyncManager
 
         logger.info("Initializing services in Container")
 
@@ -60,8 +68,7 @@ class Container:
         )
         self.register_service("embeddings", embeddings)
         vector_store = Chroma(
-            persist_directory=str(self.settings.chroma_path), 
-            embedding_function=embeddings
+            persist_directory=str(self.settings.chroma_path), embedding_function=embeddings
         )
         self.register_service("vector_store", vector_store)
 
@@ -71,8 +78,8 @@ class Container:
 
         # Session Store & Export Engine
         session_store = SessionStore(
-            db_path=self.settings.data_dir / "sessions.db", 
-            key_file=self.settings.sqlcipher_key_file
+            db_path=self.settings.data_dir / "sessions.db",
+            key_file=self.settings.sqlcipher_key_file,
         )
         self.register_service("session_store", session_store)
         self.register_service("export_engine", ExportEngine(session_store))
@@ -84,26 +91,51 @@ class Container:
 
         # Meta Agent
         meta_agent = MetaAgent(
-            self.settings, 
-            colosseum, 
-            vector_store=vector_store, 
+            self.settings,
+            colosseum,
+            vector_store=vector_store,
             sparse_index=self.get_service("sparse_index"),
-            replay_buffer=self.get_service("replay_buffer")
+            replay_buffer=self.get_service("replay_buffer"),
+            export_engine=self.get_service("export_engine"),
         )
         await meta_agent.initialize()
         self.register_service("meta_agent", meta_agent)
 
+        # 7. Sync Manager
+        node_id_file = self.settings.data_dir / "node_id.txt"
+        if node_id_file.exists():
+            node_id = node_id_file.read_text().strip()
+        else:
+            node_id = str(uuid.uuid4())[:8]
+            node_id_file.write_text(node_id)
+
+        sync_event_log = EventLog(db_path=self.settings.data_dir / "sync_events.db")
+        sync_manager = SyncManager(
+            node_id=node_id, port=self.settings.aetherforge_port, event_log=sync_event_log
+        )
+        self.register_service("sync_manager", sync_manager)
+        app_state.sync_manager = sync_manager
+        await sync_manager.start()
+
         # 8. Module Plugins
-        from src.modules.core_tools import CoreModule
-        from src.modules.watchtower.module import WatchTowerModule
-        from src.modules.streamsync.module import StreamSyncModule
         from src.modules.analytics.module import AnalyticsModule
-        
+        from src.modules.core_tools import CoreModule
+        from src.modules.localbuddy.module import LocalBuddyModule
+        from src.modules.ragforge.module import RagForgeModule
+        from src.modules.streamsync.module import StreamSyncModule
+        from src.modules.sync.module import SyncModule
+        from src.modules.tunelab.module import TuneLabModule
+        from src.modules.watchtower.module import WatchTowerModule
+
         self._modules["core"] = CoreModule(self.settings)
         self._modules["watchtower"] = WatchTowerModule()
         self._modules["streamsync"] = StreamSyncModule()
         self._modules["analytics"] = AnalyticsModule()
-        
+        self._modules["ragforge"] = RagForgeModule(meta_agent._get_cognitive_rag())
+        self._modules["tunelab"] = TuneLabModule(self.settings, self.get_service("replay_buffer"))
+        self._modules["localbuddy"] = LocalBuddyModule()
+        self._modules["sync"] = SyncModule(sync_manager)
+
         for mod in self._modules.values():
             await mod.initialize()
             mod.register_tools()
@@ -123,7 +155,31 @@ class Container:
     async def shutdown_all(self) -> None:
         """Gracefully shut down all services."""
         logger.info("Shutting down services in Container")
+
+        # 1. Sync Manager
+        if "sync_manager" in self._services:
+            try:
+                await self._services["sync_manager"].stop()
+                logger.info("SyncManager stopped")
+            except Exception as e:
+                logger.error("Error stopping SyncManager", error=str(e))
+
+        # 2. Replay Buffer
         if "replay_buffer" in self._services:
-            await self._services["replay_buffer"].flush()
+            try:
+                await self._services["replay_buffer"].flush()
+                logger.info("ReplayBuffer flushed")
+            except Exception as e:
+                logger.error("Error flushing ReplayBuffer", error=str(e))
+
+        # 3. Module Plugins
+        for name, mod in self._modules.items():
+            try:
+                if hasattr(mod, "shutdown"):
+                    await mod.shutdown()
+                logger.info("Module shut down", module=name)
+            except Exception as e:
+                logger.error("Error shutting down module", module=name, error=str(e))
+
 
 container = Container()

@@ -14,12 +14,16 @@
 from __future__ import annotations
 
 import json
+
 import structlog
+
 try:
     import sqlcipher3 as sqlite3
+
     HAS_SQLCIPHER = True
 except ImportError:
     import sqlite3
+
     HAS_SQLCIPHER = False
 import threading
 import time
@@ -69,7 +73,7 @@ class SessionSummary:
 class StoredMessage:
     id: str
     session_id: str
-    role: str          # 'user' | 'assistant' | 'system'
+    role: str  # 'user' | 'assistant' | 'system'
     content: str
     ts: float
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -86,7 +90,9 @@ class SessionStore:
         store.get_messages(session_id) ← called on page load / restart
     """
 
-    def __init__(self, db_path: str | Path = "./data/sessions.db", key_file: str | Path | None = None) -> None:
+    def __init__(
+        self, db_path: str | Path = "./data/sessions.db", key_file: str | Path | None = None
+    ) -> None:
         self.db_path = Path(db_path)
         self.key_file = Path(key_file) if key_file else None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +119,7 @@ class SessionStore:
                     logger.debug("SessionStore: SECURE (SQLCipher active)")
                 except Exception as e:
                     logger.error("SessionStore: Encryption key error or corrupt database: %s", e)
-            
+
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA foreign_keys = ON")
         return self._conn
@@ -176,8 +182,11 @@ class SessionStore:
             ).fetchall()
         return [
             SessionSummary(
-                id=r["id"], module=r["module"], title=r["title"],
-                created_at=r["created_at"], updated_at=r["updated_at"],
+                id=r["id"],
+                module=r["module"],
+                title=r["title"],
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
                 message_count=r["message_count"],
             )
             for r in rows
@@ -215,8 +224,7 @@ class SessionStore:
             conn.execute(
                 "INSERT INTO messages (id, session_id, role, content, ts, metadata) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, session_id, role, content, now,
-                 json.dumps(metadata or {})),
+                (msg_id, session_id, role, content, now, json.dumps(metadata or {})),
             )
             conn.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?",
@@ -236,8 +244,11 @@ class SessionStore:
         ).fetchall()
         return [
             StoredMessage(
-                id=r["id"], session_id=r["session_id"], role=r["role"],
-                content=r["content"], ts=r["ts"],
+                id=r["id"],
+                session_id=r["session_id"],
+                role=r["role"],
+                content=r["content"],
+                ts=r["ts"],
                 metadata=json.loads(r["metadata"] or "{}"),
             )
             for r in rows
@@ -245,9 +256,7 @@ class SessionStore:
 
     def session_exists(self, session_id: str) -> bool:
         conn = self._get_conn()
-        return bool(
-            conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone()
-        )
+        return bool(conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone())
 
     # ── LangChain message conversion ─────────────────────────────
 
@@ -257,6 +266,7 @@ class SessionStore:
         Returns a list compatible with _session_memories values.
         """
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
         from src.meta_agent import _SYSTEM_PROMPT  # avoid circular at module load
 
         msgs = self.get_messages(session_id)

@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ── Design tokens ─────────────────────────────────────────────── */
-:root {
+:root, .theme-sovereign {
   --bg-0: #060a12;
   --bg-1: #0c1220;
   --bg-2: #101828;
@@ -22,6 +22,113 @@
   --radius: 12px;
   --radius-sm: 8px;
   --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+.theme-nordic {
+  --bg-0: #f8fafc;
+  --bg-1: #f1f5f9;
+  --bg-2: #e2e8f0;
+  --bg-3: #cbd5e1;
+  --glass: rgba(0, 0, 0, 0.02);
+  --glass-border: rgba(0, 0, 0, 0.05);
+  --glass-hover: rgba(0, 0, 0, 0.04);
+  --aether: #3b82f6;
+  --aether-light: #60a5fa;
+  --volt: #0ea5e9;
+  --volt-light: #38bdf8;
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --radius: 16px; /* Rounder in Nordic */
+}
+
+.theme-cyberpunk {
+  --bg-0: #020202;
+  --bg-1: #0a0a0c;
+  --bg-2: #121214;
+  --bg-3: #1a1a1c;
+  --glass: rgba(240, 171, 252, 0.03);
+  --glass-border: rgba(240, 171, 252, 0.15);
+  --glass-hover: rgba(240, 171, 252, 0.08);
+  --aether: #f0abfc;
+  --aether-light: #f5d0fe;
+  --volt: #22d3ee;
+  --volt-light: #67e8f9;
+  --text-primary: #ffffff;
+  --text-secondary: #d1d5db;
+  --text-muted: #6b7280;
+  --radius: 4px; /* Sharper in Cyberpunk */
+}
+
+.theme-monochrome {
+  --bg-0: #111827;
+  --bg-1: #1f2937;
+  --bg-2: #374151;
+  --bg-3: #4b5563;
+  --glass: rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-hover: rgba(255, 255, 255, 0.06);
+  --aether: #ffffff;
+  --aether-light: #f3f4f6;
+  --volt: #9ca3af;
+  --volt-light: #d1d5db;
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+  --text-muted: #4b5563;
+  --radius: 0px; /* Square in Monochrome */
+}
+
+.theme-forest {
+  --bg-0: #051b14;
+  --bg-1: #062a1e;
+  --bg-2: #064e3b;
+  --bg-3: #065f46;
+  --glass: rgba(16, 185, 129, 0.02);
+  --glass-border: rgba(16, 185, 129, 0.1);
+  --glass-hover: rgba(16, 185, 129, 0.06);
+  --aether: #10b981;
+  --aether-light: #34d399;
+  --volt: #84cc16;
+  --volt-light: #bef264;
+  --text-primary: #ecfdf5;
+  --text-secondary: #6ee7b7;
+  --text-muted: #065f46;
+  --font-main: 'JetBrains Mono', monospace; /* Hard Override for Forest */
+}
+
+/* ── Theme Layout Refinements ──────────────────────────────────── */
+
+/* Forest Scanlines */
+.theme-forest .app-shell::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%),
+              linear-gradient(90deg, rgba(255, 0, 0, 0.02), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.02));
+  background-size: 100% 4px, 3px 100%;
+  pointer-events: none;
+  z-index: 100;
+  opacity: 0.3;
+}
+
+/* Cyberpunk Glows */
+.theme-cyberpunk .bubble.user-bubble {
+  box-shadow: 0 0 15px rgba(240, 171, 252, 0.2);
+}
+.theme-cyberpunk .logo-mark {
+  box-shadow: 0 0 20px rgba(240, 171, 252, 0.5), 0 0 40px rgba(34, 211, 238, 0.3);
+}
+
+/* Nordic Softness */
+.theme-nordic .bubble {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
+}
+
+/* Standard property fix for lints */
+.logo-name {
+  background-clip: text;
 }
 
 /* ── Base ──────────────────────────────────────────────────────── */
@@ -100,6 +207,7 @@ body {
   font-weight: 600;
   background: linear-gradient(135deg, #e2d9f3, #a78bfa);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   letter-spacing: -0.3px;
 }
@@ -1134,6 +1242,7 @@ body {
   font-family: 'JetBrains Mono', monospace;
   background: linear-gradient(135deg, var(--text-primary), var(--aether-light));
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   line-height: 1;
 }
