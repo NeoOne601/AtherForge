@@ -46,7 +46,16 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
     };
 
     const uploadFile = async (file: File) => {
-        setDocs(prev => [...prev.filter(d => d.name !== file.name), { name: file.name, status: "Embedding", tokens: "—", active: true }]);
+        setDocs(prev => [
+            ...prev.filter(d => d.name !== file.name),
+            {
+                document_id: `pending-${file.name}`,
+                name: file.name,
+                status: "queued",
+                tokens: "—",
+                active: true,
+            }
+        ]);
 
         try {
             const formData = new FormData();
@@ -59,12 +68,20 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
             const data = await res.json();
 
             if (res.ok) {
-                setDocs(prev => prev.map(d => d.name === file.name ? { ...d, status: "Ready", tokens: `~${data.result.chunks_added} chunks` } : d));
+                setDocs(prev => prev.map(d => d.name === file.name ? {
+                    ...d,
+                    document_id: data.document_id,
+                    status: data.ingest_status,
+                    tokens: `~${data.chunks_added} chunks`,
+                    chunk_count: data.chunks_added,
+                    image_pages_pending: data.image_pages_pending,
+                    last_error: data.last_error,
+                } : d));
             } else {
-                setDocs(prev => prev.map(d => d.name === file.name ? { ...d, status: "Failed", tokens: "error" } : d));
+                setDocs(prev => prev.map(d => d.name === file.name ? { ...d, status: "failed", tokens: "error" } : d));
             }
         } catch (err) {
-            setDocs(prev => prev.map(d => d.name === file.name ? { ...d, status: "Failed", tokens: "network err" } : d));
+            setDocs(prev => prev.map(d => d.name === file.name ? { ...d, status: "failed", tokens: "network err" } : d));
         }
     };
 
@@ -83,8 +100,19 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
         }
     };
 
-    const toggleDoc = (name: string) => {
-        setDocs(prev => prev.map(d => d.name === name ? { ...d, active: !d.active } : d));
+    const toggleDoc = async (doc: RAGDoc) => {
+        const nextSelected = !doc.active;
+        setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, active: nextSelected } : d));
+        try {
+            await fetch(`/api/v1/ragforge/documents/${doc.document_id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ selected: nextSelected }),
+            });
+        } catch (err) {
+            console.error("Failed to update document selection", err);
+            setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, active: doc.active } : d));
+        }
     };
 
     return (
@@ -125,17 +153,19 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                     <div className="upload-hint">PDF, MD, TXT, CSV (Max 50MB)</div>
                 </div>
                 <div style={{ flex: 1 }} className="doc-list">
-                    {docs.map((d, i) => (
-                        <div key={i} className="doc-item" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    {docs.map((d) => (
+                        <div key={d.document_id} className="doc-item" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                             <input
                                 type="checkbox"
                                 checked={d.active}
-                                onChange={() => toggleDoc(d.name)}
+                                onChange={() => toggleDoc(d)}
                                 style={{ accentColor: "var(--plasma)", cursor: "pointer" }}
                             />
                             <span className="doc-name" style={{ flex: 1, opacity: d.active ? 1 : 0.5 }}>{d.name}</span>
                             <span className="doc-meta">
-                                {d.status === "Ready" ? <span style={{ color: "var(--plasma)" }}>● {d.status}</span> : <span style={{ color: d.status === "Failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>}
+                                {d.status === "ready"
+                                    ? <span style={{ color: "var(--plasma)" }}>● {d.status}</span>
+                                    : <span style={{ color: d.status === "failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>}
                                 <span>{d.tokens}</span>
                             </span>
                         </div>

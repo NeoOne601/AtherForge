@@ -19,10 +19,10 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import structlog
-from langchain_core.documents import Document
+import structlog # type: ignore
+from langchain_core.documents import Document # type: ignore
 
 logger = structlog.get_logger("aetherforge.ragforge.sparse")
 
@@ -50,35 +50,59 @@ class SparseIndex:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")  # concurrent reads
+            assert self._conn is not None
+            self._conn.execute("PRAGMA journal_mode=WAL")  # type: ignore
         assert self._conn is not None
-        return self._conn
+        from typing import cast
+        return cast(sqlite3.Connection, self._conn)
 
     def _ensure_schema(self) -> None:
-        """Create FTS5 virtual table if it doesn't exist."""
+        """Create or migrate FTS5 virtual table."""
         conn = self._get_conn()
+        
+        # Check if table exists and what type it is
+        fts_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='chunks_fts'"
+        ).fetchone()
+        
+        if fts_sql and "content='chunks'" not in fts_sql[0]:
+            logger.info("Migrating standalone FTS5 table to external content table...")
+            conn.executescript("""
+                DROP TRIGGER IF EXISTS chunks_ai;
+                DROP TRIGGER IF EXISTS chunks_ad;
+                DROP TRIGGER IF EXISTS chunks_au;
+                DROP TABLE IF EXISTS chunks_fts;
+            """)
+            conn.commit()
+
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS chunks (
                 chunk_id   TEXT PRIMARY KEY,
+                source     TEXT NOT NULL,
                 content    TEXT NOT NULL,
                 metadata   TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                 content,
+                content='chunks',
                 content_rowid='rowid',
                 tokenize='porter unicode61'
             );
 
             -- Triggers to keep FTS5 index in sync with chunks table
             CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-                INSERT INTO chunks_fts(rowid, content)
-                VALUES (new.rowid, new.content);
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
             END;
 
             CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, content)
-                VALUES ('delete', old.rowid, old.content);
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                INSERT INTO chunks_fts(rowid, content) VALUES(new.rowid, new.content);
             END;
         """)
         conn.commit()
@@ -93,19 +117,20 @@ class SparseIndex:
             return 0
 
         conn = self._get_conn()
-        added = 0
+        added: int = 0
         with self._write_lock:  # Prevent concurrent write corruption
             for chunk in chunks:
                 chunk_id = chunk.metadata.get("chunk_id", "")
+                source = chunk.metadata.get("source", "unknown")
                 if not chunk_id:
                     continue
 
                 try:
                     conn.execute(
-                        "INSERT OR IGNORE INTO chunks (chunk_id, content, metadata) VALUES (?, ?, ?)",
-                        (chunk_id, chunk.page_content, json.dumps(chunk.metadata)),
+                        "INSERT OR IGNORE INTO chunks (chunk_id, source, content, metadata) VALUES (?, ?, ?, ?)",
+                        (chunk_id, source, chunk.page_content, json.dumps(chunk.metadata)),
                     )
-                    added += 1
+                    added += 1 # type: ignore
                 except sqlite3.IntegrityError:
                     pass  # duplicate chunk_id, skip
 
@@ -140,40 +165,41 @@ class SparseIndex:
         try:
             # BM25 scoring with FTS5
             # bm25(chunks_fts) returns negative values; more negative = better match
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT c.chunk_id, c.content, c.metadata, bm25(chunks_fts) AS score
                 FROM chunks_fts
                 JOIN chunks c ON c.rowid = chunks_fts.rowid
                 WHERE chunks_fts MATCH ?
-                ORDER BY score
-                LIMIT ?
-            """,
-                (safe_query, k * 2),
-            ).fetchall()  # fetch extra for post-filtering
+            """
+            params = [safe_query]
+
+            if source_filter:
+                if isinstance(source_filter, str):
+                    sql += " AND c.source = ?"
+                    params.append(source_filter)
+                elif isinstance(source_filter, list):
+                    placeholders = ",".join(["?"] * len(source_filter))
+                    sql += f" AND c.source IN ({placeholders})"
+                    params.extend(source_filter)
+
+            sql += " ORDER BY score LIMIT ?"
+            params.append(k * 2) # type: ignore
+
+            rows = conn.execute(sql, params).fetchall()  # fetch extra for post-filtering
         except sqlite3.OperationalError as e:
-            logger.warning("FTS5 query failed: %s (query: '%s')", e, safe_query[:100])
+            logger.warning("FTS5 query failed: %s (query: '%s')", e, safe_query[:100]) # type: ignore
             return []
 
         results: list[tuple[Document, float]] = []
         for chunk_id, content, meta_json, score in rows:
             meta = json.loads(meta_json)
-
-            # Apply source filter
-            if source_filter:
-                src = meta.get("source", "")
-                if isinstance(source_filter, str) and src != source_filter:
-                    continue
-                if isinstance(source_filter, list) and src not in source_filter:
-                    continue
-
             doc = Document(page_content=content, metadata=meta)
             results.append((doc, score))
 
             if len(results) >= k:
                 break
 
-        logger.info("FTS5/BM25: %d results for '%s...'", len(results), query[:50])
+        logger.info("FTS5/BM25: %d results for '%s...'", len(results), query[:50]) # type: ignore
         return results
 
     def delete_by_source(self, source: str) -> int:
@@ -181,7 +207,7 @@ class SparseIndex:
         conn = self._get_conn()
         with self._write_lock:
             cursor = conn.execute(
-                "DELETE FROM chunks WHERE json_extract(metadata, '$.source') = ?",
+                "DELETE FROM chunks WHERE source = ?",
                 (source,),
             )
             conn.commit()
@@ -198,7 +224,7 @@ class SparseIndex:
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT content, metadata FROM chunks "
-            "WHERE json_extract(metadata, '$.source') = ? "
+            "WHERE source = ? "
             "AND json_extract(metadata, '$.chunk_type') = 'vlm_analysis'",
             (source,),
         ).fetchall()
@@ -216,7 +242,7 @@ class SparseIndex:
         conn = self._get_conn()
         query = (
             "SELECT content, metadata FROM chunks "
-            "WHERE json_extract(metadata, '$.source') = ? "
+            "WHERE source = ? "
             "ORDER BY CAST(COALESCE(json_extract(metadata, '$.page'), 0) AS INTEGER), "
             "COALESCE(json_extract(metadata, '$.section'), ''), rowid"
         )
@@ -247,7 +273,7 @@ class SparseIndex:
         with self._write_lock:
             cursor = conn.execute(
                 "DELETE FROM chunks "
-                "WHERE json_extract(metadata, '$.source') = ? "
+                "WHERE source = ? "
                 "AND json_extract(metadata, '$.chunk_type') = 'vlm_analysis'",
                 (source,),
             )
@@ -261,8 +287,8 @@ class SparseIndex:
         return conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
+        if self._conn is not None:
+            self._conn.close() # type: ignore
             self._conn = None
 
     @staticmethod
@@ -327,22 +353,23 @@ def hybrid_search(
         elif isinstance(source_filter, list) and len(source_filter) == 1:
             filter_kwargs["filter"] = {"source": source_filter[0]}
         elif isinstance(source_filter, list):
-            filter_kwargs["filter"] = {"source": {"$in": source_filter}}
+            filter_kwargs["filter"] = {"source": {"$in": source_filter}} # type: ignore
 
     try:
-        dense_results = vector_store.similarity_search(query, k=k * 2, **filter_kwargs)
+        dense_results: list[Document] = vector_store.similarity_search(query, k=k * 2, **filter_kwargs)
         dense_count = len(dense_results)
         for rank, doc in enumerate(dense_results):
             doc_id = _doc_identifier(doc)
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + dense_weight / (RRF_K + rank + 1)
+            curr_score = cast(Any, rrf_scores).get(doc_id, 0)
+            cast(Any, rrf_scores)[doc_id] = curr_score + (dense_weight / (RRF_K + rank + 1))
             doc_map[doc_id] = doc
-        logger.info("Dense retrieval: %d results for '%s...'", dense_count, query[:50])
+        logger.info("Dense retrieval: %d results for '%s...'", dense_count, query[:50]) # type: ignore
     except Exception as e:
         logger.warning("Dense search failed: %s", e, exc_info=True)
 
     # ── Sparse retrieval (FTS5/BM25) ─────────────────────────────
     try:
-        sparse_results = sparse_index.search(
+        sparse_results: list[tuple[Document, float]] = sparse_index.search(
             query,
             k=k * 2,
             source_filter=source_filter,
@@ -350,16 +377,17 @@ def hybrid_search(
         sparse_count = len(sparse_results)
         for rank, (doc, _bm25_score) in enumerate(sparse_results):
             doc_id = _doc_identifier(doc)
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + sparse_weight / (RRF_K + rank + 1)
+            curr_score = cast(Any, rrf_scores).get(doc_id, 0)
+            cast(Any, rrf_scores)[doc_id] = curr_score + (sparse_weight / (RRF_K + rank + 1))
             if doc_id not in doc_map:
                 doc_map[doc_id] = doc
-        logger.info("Sparse retrieval: %d results for '%s...'", sparse_count, query[:50])
+        logger.info("Sparse retrieval: %d results for '%s...'", sparse_count, query[:50]) # type: ignore
     except Exception as e:
         logger.warning("Sparse search failed: %s — falling back to dense-only", e, exc_info=True)
 
     # ── Rank by combined RRF score ────────────────────────────────
     ranked_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
-    final_docs = [doc_map[doc_id] for doc_id in ranked_ids[:k]]
+    final_docs = [doc_map[doc_id] for doc_id in ranked_ids[:k]] # type: ignore
 
     logger.info(
         "Hybrid search: %d final results (dense=%d, sparse=%d, fused=%d)",
@@ -380,5 +408,5 @@ def _doc_identifier(doc: Document) -> str:
     # Fallback: hash of source + page + content prefix
     source = meta.get("source", "")
     page = str(meta.get("page", ""))
-    content_prefix = doc.page_content[:100]
+    content_prefix = doc.page_content[:100] # type: ignore
     return f"{source}:{page}:{hash(content_prefix)}"

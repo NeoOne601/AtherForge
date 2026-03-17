@@ -130,7 +130,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Directory Watcher
     live_folder = settings.data_dir.resolve() / "LiveFolder"
     state.directory_watcher = DirectoryWatcher(
-        live_folder, asyncio.get_running_loop(), state.vector_store, state.sparse_index
+        live_folder,
+        asyncio.get_running_loop(),
+        state,
     )
     state.directory_watcher.start()
 
@@ -138,6 +140,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     state.scheduler = AsyncIOScheduler()
     state.scheduler.add_job(
         _nightly_oplora_job, CronTrigger(hour=3), args=[app], id="nightly_oplora"
+    )
+    # Retry skipped VLM enrichment every 5 minutes
+    state.scheduler.add_job(
+        container.get_service("document_intelligence").retry_pending_ocr,
+        "interval",
+        minutes=5,
+        id="vlm_retry_job",
     )
     state.scheduler.start()
 
@@ -163,7 +172,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:1420", "https://tauri.localhost"],
+        allow_origins=["http://localhost:1420", "http://127.0.0.1:1420", "https://tauri.localhost"],
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],

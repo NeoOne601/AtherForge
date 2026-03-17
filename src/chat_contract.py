@@ -19,24 +19,78 @@ def resolve_session_id(raw_id: str, module: str) -> tuple[str, bool]:
     return base, is_new
 
 
+# Matches tool calls like `{"name": "search_web", "arguments": ...}` with or without markdown
+_TOOL_JSON_RE = re.compile(
+    r"(?:```(?:json)?\s*)?\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:\s*\{.*?\}\s*\}\s*(?:```)?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def sanitize_output(text: str, is_stream: bool = False) -> str:
+    """Rigorous project-wide guard to strip protocol tags and stray tool JSON from user-facing text."""
+    if not text:
+        return ""
+    # 1. Strip any lingering protocol tags (handle partials like </think)
+    # Using a more robust regex that handles the closing tag correctly
+    text = re.sub(r"</?think\s*>? ?", "", text, flags=re.IGNORECASE)
+    
+    # 2. Strip explicit tool JSON payloads that might have leaked
+    text = _TOOL_JSON_RE.sub(" ", text)
+    
+    # 3. Cleanup spacing and noise (PRESERVE NEWLINES AND STREAM CONTEXT)
+    if is_stream:
+        # In stream mode, we ONLY strip protocol tags. 
+        # We MUST NOT strip spaces because they might be needed between chunks.
+        return text
+    
+    # Only collapse multiple horizontal spaces, not vertical ones
+    text = re.sub(r"[ \t]+", " ", text)
+    # Strip any leading/trailing spaces on each line, but keep the lines
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return text.strip()
+
+
 def split_reasoning_trace(text: str) -> tuple[str | None, str]:
-    """Extract a visible reasoning block from <think>...</think> output."""
+    """Extract a visible reasoning block from <think>...</think> output, returning sanitized answer."""
     open_tag = "<think>"
-    close_tag = "</think>"
+    close_tags = ["</think>", "</think"] # Support partial tags
+
     start = text.find(open_tag)
     if start == -1:
-        return None, text.strip()
+        # If no explicit tags, check if the model just started reasoning without the tag
+        # (common with some small models that skip the prefix)
+        return None, sanitize_output(text)
 
-    before = text[:start].strip()
-    after_open = text[start + len(open_tag) :]
-    end = after_open.find(close_tag)
+    before = text[:start].strip() # type: ignore
+    after_open = text[start + len(open_tag):] # type: ignore
+    
+    # Look for any matching closing tag
+    end = -1
+    matched_tag_len = 0
+    for tag in close_tags:
+        idx = after_open.find(tag) # type: ignore
+        if idx != -1:
+            end = idx
+            matched_tag_len = len(tag)
+            break
+
     if end == -1:
-        reasoning = after_open.strip() or None
-        return reasoning, before
+        # If no closing tag, everything after the opening tag is currently reasoning
+        reasoning = after_open.strip() or None # type: ignore
+        return reasoning, sanitize_output(before)
 
-    reasoning = after_open[:end].strip() or None
-    answer = f"{before}\n{after_open[end + len(close_tag):]}".strip()
-    return reasoning, answer
+    reasoning = after_open[:end].strip() or None # type: ignore
+    
+    # Extract what remains after the closing tag
+    remaining = after_open[end + matched_tag_len:] # type: ignore
+    # If the tag was partial e.g. "</think", it might be follow by ">"
+    if remaining.startswith(">"):
+        remaining = remaining[1:] # type: ignore
+        
+    # Crucial: If 'before' and 'remaining' are both empty/whitespace, then
+    # the entire message was reasoning. Retain the reasoning for the UI.
+    answer = f"{before}\n{remaining}"
+    return reasoning, sanitize_output(answer)
 
 
 def extract_attachment_names(text: str) -> list[str]:
@@ -143,4 +197,4 @@ def _compact_text(text: str, limit: int) -> str:
     collapsed = " ".join((text or "").split())
     if len(collapsed) <= limit:
         return collapsed
-    return collapsed[: limit - 3].rstrip() + "..."
+    return collapsed[: limit - 3].rstrip() + "..."  # type: ignore[misc]

@@ -1,48 +1,55 @@
-import asyncio
-
 import structlog
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from src.settings_store import save_partial_settings
 
 router = APIRouter(prefix="/api/v1/ragforge", tags=["RAGForge"])
 logger = structlog.get_logger("aetherforge.ragforge")
 
 
+class DocumentSelectionRequest(BaseModel):
+    selected: bool
+
+
 @router.get("/documents")
-async def list_rag_documents(request: Request, limit: int = 50, offset: int = 0) -> JSONResponse:
+async def list_rag_documents(request: Request, limit: int = 100, offset: int = 0) -> JSONResponse:
     state = request.app.state.app_state
-    if not state.vector_store:
-        return JSONResponse({"documents": [], "total": 0})
+    records = state.document_registry.list_documents(limit=limit, offset=offset)
+    documents = []
+    for record in records:
+        payload = record.to_dict()
+        payload["name"] = record.source
+        payload["status"] = record.ingest_status
+        payload["tokens"] = f"~{record.chunk_count} chunks"
+        documents.append(payload)
 
-    try:
-        col = state.vector_store._collection
-        # In a real scenario, we would use limit/offset in the query,
-        # but Chroma's .get() has limit/offset support.
-        res = await asyncio.to_thread(col.get, include=["metadatas"])
-        metadatas = res.get("metadatas", [])
+    return JSONResponse(
+        {
+            "documents": documents,
+            "total": state.document_registry.count_documents(),
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
-        doc_map = {}
-        for m in metadatas:
-            if not m:
-                continue
-            src = m.get("source")
-            if not src:
-                continue
-            doc_map[src] = doc_map.get(src, 0) + 1
 
-        all_docs = []
-        for src, count in doc_map.items():
-            all_docs.append({"name": src, "status": "Ready", "tokens": f"~{count} chunks"})
-
-        # Apply manual pagination for the grouped document list
-        paginated_docs = all_docs[offset : offset + limit]
-
-        return JSONResponse(
-            {"documents": paginated_docs, "total": len(all_docs), "limit": limit, "offset": offset}
-        )
-    except Exception as e:
-        logger.error("Failed to list ragforge documents: %s", e)
-        return JSONResponse({"documents": [], "total": 0})
+@router.patch("/documents/{document_id}")
+async def update_document_selection(
+    document_id: str,
+    payload: DocumentSelectionRequest,
+    request: Request,
+) -> JSONResponse:
+    state = request.app.state.app_state
+    updated = state.document_registry.update_document(document_id, selected=payload.selected)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    body = updated.to_dict()
+    body["name"] = updated.source
+    body["status"] = updated.ingest_status
+    body["tokens"] = f"~{updated.chunk_count} chunks"
+    return JSONResponse(body)
 
 
 @router.post("/upload")
@@ -51,23 +58,19 @@ async def upload_document(request: Request, file: UploadFile = File(...)) -> JSO
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
-    file_path = state.settings.data_dir / "uploads" / file.filename
+    file_path = state.settings.uploads_dir / file.filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        with open(file_path, "wb") as handle:
+            handle.write(content)
 
-        from src.modules.ragforge_indexer import index_document
-
-        result = await asyncio.to_thread(
-            index_document, file_path, state.vector_store, state.sparse_index
-        )
-        return JSONResponse({"status": "Success", "filename": file.filename, "result": result})
-    except Exception as e:
-        logger.error("Upload failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        result = await state.document_intelligence.ingest_path(file_path)
+        return JSONResponse(result)
+    except Exception as exc:
+        logger.exception("Upload failed", filename=file.filename, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/vlm-options")
@@ -77,25 +80,29 @@ async def get_vlm_options(request: Request):
 
     from src.modules.ragforge.vlm_provider import list_providers
 
+    state = request.app.state.app_state
     providers = list_providers()
     is_mac = platform.system() == "Darwin"
 
     options = []
-    default_vlm = "smolvlm-256m"
+    default_vlm = getattr(state, "selected_vlm_id", "smolvlm-256m")
 
-    # Logic for hardware rating and default selection
-    for p in providers:
+    for provider in providers:
         hw_rating = "optimal"
-        if p.id == "apple-vlm" and not is_mac:
-            continue  # Only show Apple VLM on Mac
+        if provider.id == "apple-vlm" and not is_mac:
+            continue
+        if provider.id == "ollama-qwen3.5-9b":
+            hw_rating = "warning"
 
-        if p.id == "ollama-qwen3.5-9b":
-            hw_rating = "warning"  # High RAM requirement
-
-        options.append({"id": p.id, "name": p.name, "hardware_rating": hw_rating, "tier": p.tier})
-
-        # Default to apple-vlm on Mac if available
-        if is_mac and p.id == "apple-vlm":
+        options.append(
+            {
+                "id": provider.id,
+                "name": provider.name,
+                "hardware_rating": hw_rating,
+                "tier": provider.tier,
+            }
+        )
+        if is_mac and provider.id == "apple-vlm" and default_vlm == "smolvlm-256m":
             default_vlm = "apple-vlm"
 
     return {"options": options, "selected": default_vlm}
@@ -104,6 +111,9 @@ async def get_vlm_options(request: Request):
 @router.post("/vlm-select")
 async def select_vlm(payload: dict, request: Request):
     """Select the VLM to use for image/pdf enrichment."""
-    vlm_id = payload.get("vlm_id")
+    vlm_id = str(payload.get("vlm_id", "smolvlm-256m"))
+    state = request.app.state.app_state
+    state.selected_vlm_id = vlm_id
+    save_partial_settings({"SELECTED_VLM_ID": vlm_id})
     logger.info("VLM selection updated", vlm_id=vlm_id)
-    return {"status": "ok", "vlm_id": vlm_id}
+    return {"status": "ok", "vlm_id": vlm_id, "selected": vlm_id}

@@ -16,9 +16,12 @@ interface ChatPanelProps {
     sessionId?: string | null;
     preloadedMessages?: StoredMessage[] | null;
     onSessionCreated?: (id: string) => void;
+    onRequestSession?: () => Promise<string | null>;
     webSearchEnabled?: boolean;
-    deepReasoningEnabled?: boolean;
-    onToggleDeepReasoning?: () => void;
+    deepResearchEnabled?: boolean;
+    onToggleDeepResearch?: () => void;
+    improveAnswerEnabled?: boolean;
+    onToggleImproveAnswer?: () => void;
     analyticsEnabled?: boolean;
     grammarAssist?: boolean;
     onToggleGrammarAssist?: () => void;
@@ -30,12 +33,15 @@ export function ChatPanel({
     sessionId,
     preloadedMessages,
     onSessionCreated,
+    onRequestSession,
     webSearchEnabled,
-    deepReasoningEnabled,
+    deepResearchEnabled,
+    improveAnswerEnabled,
     analyticsEnabled,
     grammarAssist,
     onToggleGrammarAssist,
-    onToggleDeepReasoning,
+    onToggleDeepResearch,
+    onToggleImproveAnswer,
 }: ChatPanelProps) {
     const [messagesByModule, setMessagesByModule] = useState<Record<string, Message[]>>({
         localbuddy: [],
@@ -46,7 +52,10 @@ export function ChatPanel({
     });
 
     useEffect(() => {
-        if (!preloadedMessages || preloadedMessages.length === 0) return;
+        if (!preloadedMessages) {
+            setMessagesByModule(prev => ({ ...prev, [module]: [] }));
+            return;
+        }
         const loaded: Message[] = preloadedMessages
             .filter(m => m.role === "user" || m.role === "assistant")
             .map(m => ({
@@ -60,11 +69,11 @@ export function ChatPanel({
                 answer_text: (m.metadata?.answer_text as string) || undefined,
                 citations: (m.metadata?.citations as Message["citations"]) || undefined,
                 attachments: (m.metadata?.attachments as string[]) || undefined,
+                suggestions: (m.metadata?.suggestions as string[]) || undefined,
             }));
         setMessagesByModule(prev => ({ ...prev, [module]: loaded }));
     }, [preloadedMessages, module]);
 
-    const currentSessionId = sessionId || `ui-session-${module}`;
     const [ragDocs, setRagDocs] = useState<RAGDoc[]>([]);
 
     useEffect(() => {
@@ -73,15 +82,18 @@ export function ChatPanel({
                 .then(r => r.json())
                 .then(data => {
                     if (!data.documents) return;
-                    setRagDocs(prev => {
-                        const byName = new Map<string, RAGDoc>();
-                        prev.forEach(d => byName.set(d.name, d));
-                        (data.documents as RAGDoc[]).forEach(d => {
-                            const existing = byName.get(d.name);
-                            byName.set(d.name, existing ? { ...existing, ...d } : d);
-                        });
-                        return Array.from(byName.values());
-                    });
+                    setRagDocs((data.documents as any[]).map(d => ({
+                        document_id: d.document_id,
+                        name: d.name,
+                        status: d.status,
+                        tokens: d.tokens,
+                        active: Boolean(d.selected),
+                        file_type: d.file_type,
+                        parser: d.parser,
+                        chunk_count: d.chunk_count,
+                        image_pages_pending: d.image_pages_pending,
+                        last_error: d.last_error,
+                    })));
                 })
                 .catch(err => console.error("Failed to fetch rag docs", err));
         };
@@ -129,6 +141,17 @@ export function ChatPanel({
             [moduleId]: (prev[moduleId] || []).map(msg => (
                 msg.id === messageId
                     ? { ...msg, content: msg.content + chunk, streaming: true }
+                    : msg
+            )),
+        }));
+    }, []);
+
+    const appendReasoningChunk = useCallback((moduleId: string, messageId: string, chunk: string) => {
+        setMessagesByModule(prev => ({
+            ...prev,
+            [moduleId]: (prev[moduleId] || []).map(msg => (
+                msg.id === messageId
+                    ? { ...msg, reasoning_trace: (msg.reasoning_trace || "") + chunk, streaming: true }
                     : msg
             )),
         }));
@@ -213,29 +236,39 @@ export function ChatPanel({
         if (textareaRef.current) textareaRef.current.style.height = "auto";
 
         try {
+            let resolvedSessionId = sessionId;
+            if (!resolvedSessionId && onRequestSession) {
+                resolvedSessionId = await onRequestSession();
+                if (resolvedSessionId) {
+                    onSessionCreated?.(resolvedSessionId);
+                }
+            }
+            if (!resolvedSessionId) {
+                throw new Error("A session could not be created.");
+            }
+
             const activeDocs = moduleId === "ragforge" ? ragDocs.filter(d => d.active).map(d => d.name) : [];
             const contextPayload: Record<string, any> = activeDocs.length > 0 ? { active_docs: activeDocs } : {};
             if (webSearchEnabled) contextPayload.web_search_enabled = true;
-            if (deepReasoningEnabled) contextPayload.deep_reasoning = true;
-
-            const targetModule = (moduleId === "ragforge" && analyticsEnabled) ? "analytics" : moduleId;
+            if (deepResearchEnabled) contextPayload.deep_research = true;
+            if (improveAnswerEnabled) contextPayload.improve_answer = true;
+            if (moduleId === "ragforge" && analyticsEnabled) contextPayload.analytics_enabled = true;
 
             if (streaming) {
                 wsRef.current?.close();
 
                 await new Promise<void>((resolve, reject) => {
                     const ws = createChatSocket(
-                        currentSessionId,
+                        resolvedSessionId,
                         (chunk) => {
                             if (chunk.type === "meta") {
                                 onSessionCreated?.(chunk.session_id);
+                                patchMessage(moduleId, assistantId, { module: chunk.module });
                                 return;
                             }
 
                             if (chunk.type === "reasoning") {
-                                patchMessage(moduleId, assistantId, {
-                                    reasoning_trace: chunk.content,
-                                });
+                                appendReasoningChunk(moduleId, assistantId, chunk.content);
                                 return;
                             }
 
@@ -244,20 +277,27 @@ export function ChatPanel({
                                 return;
                             }
 
+                            if (chunk.type === "tool_start" || chunk.type === "tool_result") {
+                                // Silent processing for now or could log to debug
+                                return;
+                            }
+
                             if (chunk.type === "done") {
                                 const blocked = chunk.policy_decisions?.some((p: PolicyDecision) => !p.allowed);
                                 patchMessage(moduleId, assistantId, {
                                     module: chunk.module,
+                                    content: chunk.response,
                                     streaming: false,
                                     latency_ms: chunk.latency_ms,
                                     faithfulness_score: chunk.faithfulness_score ?? undefined,
-                                    reasoning_trace: chunk.reasoning_trace ?? undefined,
+                                    reasoning_trace: chunk.reasoning_summary ?? chunk.reasoning_trace ?? undefined,
                                     answer_text: chunk.answer_text ?? undefined,
                                     policy_decisions: chunk.policy_decisions,
                                     causal_graph: chunk.causal_graph ?? undefined,
                                     tool_calls: chunk.tool_calls,
                                     citations: chunk.citations ?? undefined,
                                     attachments: chunk.attachments ?? undefined,
+                                    suggestions: chunk.suggestions ?? undefined,
                                     blocked,
                                 });
                                 if (chunk.causal_graph) {
@@ -291,8 +331,8 @@ export function ChatPanel({
                     };
                     ws.onopen = () => {
                         ws.send(JSON.stringify({
-                            session_id: currentSessionId,
-                            module: targetModule,
+                            session_id: resolvedSessionId,
+                            module: moduleId,
                             message: text,
                             xray_mode: xray,
                             context: contextPayload,
@@ -306,8 +346,8 @@ export function ChatPanel({
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    session_id: currentSessionId,
-                    module: targetModule,
+                    session_id: resolvedSessionId,
+                    module: moduleId,
                     message: text,
                     xray_mode: xray,
                     context: contextPayload,
@@ -317,7 +357,7 @@ export function ChatPanel({
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
 
-            if (onSessionCreated) onSessionCreated(data.session_id || currentSessionId);
+            if (onSessionCreated) onSessionCreated(data.session_id || resolvedSessionId);
 
             const blocked = data.policy_decisions?.some((p: PolicyDecision) => !p.allowed);
             patchMessage(moduleId, assistantId, {
@@ -326,13 +366,14 @@ export function ChatPanel({
                 streaming: false,
                 latency_ms: data.latency_ms,
                 faithfulness_score: data.faithfulness_score,
-                reasoning_trace: data.reasoning_trace ?? undefined,
+                reasoning_trace: data.reasoning_summary ?? data.reasoning_trace ?? undefined,
                 answer_text: data.answer_text ?? undefined,
                 policy_decisions: data.policy_decisions,
                 causal_graph: data.causal_graph,
                 tool_calls: data.tool_calls,
                 citations: data.citations ?? undefined,
                 attachments: data.attachments ?? undefined,
+                suggestions: data.suggestions ?? undefined,
                 blocked,
             });
 
@@ -356,10 +397,12 @@ export function ChatPanel({
         xray,
         ragDocs,
         webSearchEnabled,
-        deepReasoningEnabled,
+        deepResearchEnabled,
+        improveAnswerEnabled,
         analyticsEnabled,
-        currentSessionId,
+        sessionId,
         onSessionCreated,
+        onRequestSession,
         onXrayData,
         streaming,
         appendMessageChunk,
@@ -458,13 +501,24 @@ export function ChatPanel({
                             <span className="hint-text">Enter to send · Shift+Enter for new line</span>
 
                             <div
-                                style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer", opacity: deepReasoningEnabled ? 1 : 0.6 }}
-                                onClick={onToggleDeepReasoning}
-                                title="Deep Reasoning pass"
+                                style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer", opacity: deepResearchEnabled ? 1 : 0.6 }}
+                                onClick={onToggleDeepResearch}
+                                title="Deep research with planner and VFS"
                             >
-                                <span style={{ fontSize: "10px", fontWeight: 700, color: deepReasoningEnabled ? "var(--brand-glow)" : "var(--text-muted)" }}>🧠 Reasoning</span>
-                                <div style={{ width: "20px", height: "12px", background: deepReasoningEnabled ? "rgba(0,255,100,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "10px", position: "relative" }}>
-                                    <div style={{ width: "8px", height: "8px", background: deepReasoningEnabled ? "var(--brand-glow)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "2px", left: deepReasoningEnabled ? "10px" : "2px", transition: "all 0.2s" }} />
+                                <span style={{ fontSize: "10px", fontWeight: 700, color: deepResearchEnabled ? "var(--brand-glow)" : "var(--text-muted)" }}>Deep Research</span>
+                                <div style={{ width: "20px", height: "12px", background: deepResearchEnabled ? "rgba(0,255,100,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "10px", position: "relative" }}>
+                                    <div style={{ width: "8px", height: "8px", background: deepResearchEnabled ? "var(--brand-glow)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "2px", left: deepResearchEnabled ? "10px" : "2px", transition: "all 0.2s" }} />
+                                </div>
+                            </div>
+
+                            <div
+                                style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer", opacity: improveAnswerEnabled ? 1 : 0.6 }}
+                                onClick={onToggleImproveAnswer}
+                                title="Run a second-pass answer improvement step"
+                            >
+                                <span style={{ fontSize: "10px", fontWeight: 700, color: improveAnswerEnabled ? "var(--aether-light)" : "var(--text-muted)" }}>Improve Answer</span>
+                                <div style={{ width: "20px", height: "12px", background: improveAnswerEnabled ? "rgba(124,58,237,0.2)" : "rgba(255,255,255,0.1)", borderRadius: "10px", position: "relative" }}>
+                                    <div style={{ width: "8px", height: "8px", background: improveAnswerEnabled ? "var(--aether-light)" : "var(--text-muted)", borderRadius: "50%", position: "absolute", top: "2px", left: improveAnswerEnabled ? "10px" : "2px", transition: "all 0.2s" }} />
                                 </div>
                             </div>
 
@@ -495,7 +549,7 @@ export function ChatPanel({
                             <div className={`toggle-track ${showThinking ? "on" : ""}`} onClick={() => setShowThinking(v => !v)}>
                                 <div className="toggle-thumb" />
                             </div>
-                            Show Thinking
+                            Show Reasoning
                         </label>
                         <label className="stream-toggle">
                             <div className={`toggle-track ${streaming ? "on" : ""}`} onClick={() => setStreaming(v => !v)}>

@@ -30,10 +30,12 @@ export interface ChatResponse {
     policy_decisions: PolicyDecision[];
     causal_graph: CausalGraph | null;
     faithfulness_score: number | null;
+    reasoning_summary: string | null;
     reasoning_trace: string | null;
     answer_text: string | null;
     citations: ChatCitation[];
     attachments: string[];
+    suggestions: string[];
 }
 
 export interface ToolCall {
@@ -159,6 +161,8 @@ export type StreamChunk =
     | { type: "meta"; session_id: string; module: string }
     | { type: "reasoning"; content: string }
     | { type: "token"; content: string }
+    | { type: "tool_start"; name: string; args: Record<string, unknown> }
+    | { type: "tool_result"; name: string; result: string }
     | {
         type: "done";
         session_id: string;
@@ -168,10 +172,13 @@ export type StreamChunk =
         policy_decisions: PolicyDecision[];
         causal_graph: CausalGraph | null;
         tool_calls: ToolCall[];
+        response: string;
+        reasoning_summary: string | null;
         reasoning_trace: string | null;
         answer_text: string | null;
         citations: ChatCitation[];
         attachments: string[];
+        suggestions: string[];
     }
     | { type: "error"; content: string };
 
@@ -180,7 +187,7 @@ export function createChatSocket(
     onChunk: (chunk: StreamChunk) => void,
     onError?: (err: Event) => void
 ): WebSocket {
-    const ws = new WebSocket(`ws://127.0.0.1:8765/api/v1/chat/${sessionId}`);
+    const ws = new WebSocket(`ws://127.0.0.1:8765/api/v1/ws/${sessionId}`);
     ws.onmessage = (e) => {
         try {
             const chunk = JSON.parse(e.data) as StreamChunk;

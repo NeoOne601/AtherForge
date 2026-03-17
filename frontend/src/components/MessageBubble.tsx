@@ -68,6 +68,7 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
     answer = cleanedAnswer;
     const mergedAttachments = Array.from(new Set([...(msg.attachments || []), ...attachments]));
     const citations = msg.citations || [];
+    const suggestions = msg.suggestions || [];
 
     return (
         <div className={`message-row ${isUser ? "user" : ""}`}>
@@ -174,6 +175,20 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
                             })}
                         </div>
                     </details>
+                )}
+
+                {!isUser && suggestions.length > 0 && (
+                    <div style={{ marginTop: "12px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {suggestions.map((suggestion) => (
+                            <span
+                                key={suggestion}
+                                className="chip"
+                                style={{ cursor: "default", opacity: 0.85 }}
+                            >
+                                {suggestion}
+                            </span>
+                        ))}
+                    </div>
                 )}
 
                 {!isUser && (

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import random
+import warnings
 from typing import Any
 
 import structlog
+
+# Suppress the RuntimeWarning about duckduckgo_search package rename globally for this module
+warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*duckduckgo_search.*renamed to.*ddgs.*")
 
 from src.config import AetherForgeSettings
 from src.modules.base import BaseModule
@@ -23,12 +27,18 @@ _AI_JOKES = [
 ]
 
 
+
+from src.modules.search.aggregator import MetasearchAggregator
+
+
+
 class CoreModule(BaseModule):
     """Module for system-level tools (Web Search, Weather, Jokes)."""
 
     def __init__(self, settings: AetherForgeSettings) -> None:
         super().__init__(name="core")
         self.settings = settings
+        self._aggregator = MetasearchAggregator()
 
     @property
     def system_prompt_extension(self) -> str:
@@ -57,8 +67,8 @@ class CoreModule(BaseModule):
             {
                 "name": "search_web",
                 "description": (
-                    "Searches the live internet for up-to-date "
-                    "factual information, news, or live data."
+                    "Searches the live internet using a metasearch aggregator (DDG, Startpage, Brave). "
+                    "Provides high-availability results and cross-engine deduplication."
                 ),
                 "parameters": {
                     "type": "object",
@@ -110,7 +120,27 @@ class CoreModule(BaseModule):
         state: Any | None = None,
     ) -> str:
         if name == "search_web":
-            return self._search_web(args.get("query", ""))
+            # Search is async, but execute_tool is sync.
+            # Since we are already in a dedicated thread (via MetaAgent), 
+            # we can run a new event loop.
+            import asyncio
+            query = args.get("query", "")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Add a strict safety timeout at the bridge level
+                results = loop.run_until_complete(
+                    asyncio.wait_for(self._aggregator.aggregate(query), timeout=15.0)
+                )
+                return self._format_search_results(results)
+            except asyncio.TimeoutError:
+                logger.error("Metasearch bridge timeout", query=query)
+                return "Search failed: The search took too long to respond. Please try again or simplify your query."
+            except Exception as e:
+                logger.error("Metasearch bridge failure", error=str(e))
+                return f"Search failed: {str(e)}"
+            finally:
+                loop.close()
         elif name == "get_weather":
             loc = args.get("location", "")
             if not loc and state and hasattr(state, "system_location"):
@@ -120,24 +150,27 @@ class CoreModule(BaseModule):
             return self._get_joke()
         return f"Error: Tool '{name}' not found in Core module."
 
+    def _format_search_results(self, results: list) -> str:
+        if not results:
+            return "No results found on the internet."
+        
+        chunks = []
+        for i, r in enumerate(results, 1):
+            chunks.append(
+                f"[{i}] Source: {r.url} (Engine: {r.engine})\n"
+                f"Title: {r.title}\n"
+                f"Snippet: {r.snippet}"
+            )
+        
+        header = f"Metasearch Results (Aggregated and Numbered for verification):\n\n"
+        return header + "\n\n".join(chunks)
+
     def _get_joke(self) -> str:
         return random.choice(_AI_JOKES)
 
     def _search_web(self, query: str) -> str:
-        from ddgs import DDGS
-
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=5))
-                if not results:
-                    return "No results found on the internet."
-                chunks = [
-                    f"Source: {r.get('href')}\nTitle: {r.get('title')}\nSnippet: {r.get('body')}"
-                    for r in results
-                ]
-                return "\n\n".join(chunks)
-        except Exception as e:
-            return f"Web search failed: {e}"
+        # This is now handled inside execute_tool via the bridge
+        return "DEPRECATED: Use execute_tool directly"
 
     def _get_weather(self, location: str) -> str:
         import httpx

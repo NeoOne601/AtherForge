@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,12 @@ async def async_vlm_enrich(
     vector_store: Any,
     vlm_id: str,
     sparse_index: Any,
-) -> None:
+) -> dict[str, Any]:
     """
     Background task: run selected VLM on image-bearing pages.
     """
     if not image_pages:
-        return
+        return {"status": "no_images", "chunks_added": 0, "vlm_id": vlm_id}
 
     from src.modules.ragforge_indexer import MEMORY_CEILING_PCT, MEMORY_CEILING_PCT_OLLAMA
 
@@ -35,14 +36,14 @@ async def async_vlm_enrich(
             mem_pct,
             ceiling,
         )
-        return
+        return {"status": "skipped_memory", "chunks_added": 0, "vlm_id": vlm_id}
 
     try:
         from src.modules.ragforge.vlm_provider import get_vlm_provider
 
         vlm = get_vlm_provider(vlm_id)
         if not vlm:
-            return
+            return {"chunks_added": 0, "vlm_id": vlm_id, "last_error": "VLM provider unavailable."}
 
         import uuid as uuid_mod
 
@@ -69,6 +70,8 @@ async def async_vlm_enrich(
                     "Analyze this page in detail. Extract data, labels, and logical relationships."
                 )
                 analysis = await vlm.analyze_image(img_bytes, prompt)
+                from src.chat_contract import sanitize_output
+                analysis = sanitize_output(analysis)
 
                 if analysis and "NO_FIGURES" not in analysis:
                     extracted_chunks.append(
@@ -91,6 +94,7 @@ async def async_vlm_enrich(
         pdf_doc.close()
         await vlm.unload_model()
 
+        chunks_added = 0
         if extracted_chunks:
             source_name = file_path.name
             VLM_TIER_RANK = {"smolvlm-256m": 1, "florence-2": 2, "ollama-qwen3.5-9b": 3}
@@ -112,8 +116,11 @@ async def async_vlm_enrich(
             # Indexing new chunks
             await asyncio.to_thread(vector_store.add_documents, extracted_chunks)
             if sparse_index is not None:
-                for doc in extracted_chunks:
-                    sparse_index.insert_vlm_chunk(doc)
+                await asyncio.to_thread(sparse_index.add_documents, extracted_chunks)
+            chunks_added = len(extracted_chunks)
+
+        return {"chunks_added": chunks_added, "vlm_id": vlm.id, "last_error": None}
 
     except Exception as e:
         logger.error("VLM enrichment failed: %s", e)
+        return {"chunks_added": 0, "vlm_id": vlm_id, "last_error": str(e)}

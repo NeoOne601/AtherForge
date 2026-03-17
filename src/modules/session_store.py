@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import json
 
-import structlog
+import structlog  # type: ignore[import-untyped]
 
 try:
-    import sqlcipher3 as sqlite3
+    import sqlcipher3 as sqlite3  # type: ignore[import-untyped]
 
     HAS_SQLCIPHER = True
 except ImportError:
@@ -105,24 +105,40 @@ class SessionStore:
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(
+            conn = sqlite3.connect(
                 str(self.db_path),
                 check_same_thread=False,
             )
-            if HAS_SQLCIPHER and self.key_file and self.key_file.exists():
+            self._conn = conn
+            kf = self.key_file
+            if HAS_SQLCIPHER and kf and kf.exists():
                 try:
-                    key = self.key_file.read_text().strip()
+                    key = kf.read_text().strip()
                     # SQLCipher needs the key immediately after opening
-                    self._conn.execute(f"PRAGMA key = '{key}'")
+                    conn.execute(f"PRAGMA key = '{key}'")
                     # Verify key by trying a simple operation
-                    self._conn.execute("SELECT count(*) FROM sqlite_master")
+                    conn.execute("SELECT count(*) FROM sqlite_master")
                     logger.debug("SessionStore: SECURE (SQLCipher active)")
                 except Exception as e:
-                    logger.error("SessionStore: Encryption key error or corrupt database: %s", e)
+                    err_msg = str(e).lower()
+                    if "file is not a database" in err_msg or "not authenticated" in err_msg:
+                        logger.warning(
+                            "SessionStore: DB is plain SQLite or key mismatch. Falling back to plain mode."
+                        )
+                        # RESET: We MUST close and re-open to clear the "poisoned" encrypted state
+                        # which can otherwise lead to a MemoryError in some sqlcipher3 builds.
+                        conn.close()
+                        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                        self._conn = conn
+                    else:
+                        logger.error("SessionStore: Encryption key error: %s", e)
 
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA foreign_keys = ON")
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+        
+        assert self._conn is not None
         return self._conn
+
 
     def _init_schema(self) -> None:
         with self._write_lock:
@@ -151,7 +167,7 @@ class SessionStore:
             conn = self._get_conn()
             conn.execute(
                 "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
-                (title[:120], time.time(), session_id),
+                (title[:120], time.time(), session_id),  # type: ignore[misc]
             )
             conn.commit()
 
@@ -215,7 +231,7 @@ class SessionStore:
                     (session_id,),
                 ).fetchone()[0]
                 if existing == 0:
-                    title = content[:80].replace("\n", " ").strip()
+                    title = content[:80].replace("\n", " ").strip()  # type: ignore[misc]
                     conn.execute(
                         "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
                         (title, now, session_id),
@@ -233,6 +249,56 @@ class SessionStore:
             conn.commit()
 
         return msg_id
+
+    def append_turn(
+        self,
+        *,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """Persist the user/assistant pair atomically under one lock."""
+        user_id = str(uuid.uuid4())
+        assistant_id = str(uuid.uuid4())
+        now = time.time()
+
+        with self._write_lock:
+            conn = self._get_conn()
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user'",
+                (session_id,),
+            ).fetchone()[0]
+            if existing == 0:
+                title = user_content[:80].replace("\n", " ").strip()  # type: ignore[misc]
+                conn.execute(
+                    "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
+                    (title, now, session_id),
+                )
+
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, ts, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, session_id, "user", user_content, now, "{}"),
+            )
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, ts, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    assistant_id,
+                    session_id,
+                    "assistant",
+                    assistant_content,
+                    now + 0.0001,
+                    json.dumps(assistant_metadata or {}),
+                ),
+            )
+            conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?",
+                (now + 0.0001, session_id),
+            )
+            conn.commit()
+        return user_id, assistant_id
 
     def get_messages(self, session_id: str) -> list[StoredMessage]:
         """Return messages for a session ordered by timestamp."""
@@ -265,9 +331,9 @@ class SessionStore:
         Convert stored messages to LangChain message objects for MetaAgent.
         Returns a list compatible with _session_memories values.
         """
-        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # type: ignore[import-untyped]
 
-        from src.meta_agent import _SYSTEM_PROMPT  # avoid circular at module load
+        from src.meta_agent import _SYSTEM_PROMPT  # type: ignore[import-untyped]
 
         msgs = self.get_messages(session_id)
         lc_msgs: list[Any] = [SystemMessage(content=_SYSTEM_PROMPT)]
@@ -275,11 +341,16 @@ class SessionStore:
             if m.role == "user":
                 lc_msgs.append(HumanMessage(content=m.content))
             elif m.role == "assistant":
-                lc_msgs.append(AIMessage(content=m.content))
+                # Supply ONLY the clean, user-visible answer text back into the LLM context.
+                # If we supply the raw .content (with <think> and JSON), the LLM gets trapped
+                # in a context bleed loop, echoing old tool patterns instead of answering fresh queries.
+                clean_content = m.metadata.get("answer_text") or m.content
+                lc_msgs.append(AIMessage(content=clean_content.strip()))
             # skip stored 'system' rows (already injected above)
         return lc_msgs
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
+        conn = self._conn
+        if conn:
+            conn.close()
             self._conn = None

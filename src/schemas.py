@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from src.learning.history_manager import HistoryManager
     from src.learning.replay_buffer import ReplayBuffer
     from src.meta_agent import MetaAgent
+    from src.modules.document_registry import DocumentRegistry
+    from src.modules.session_store import SessionStore
+    from src.services.document_intelligence import DocumentIntelligenceService
 
 
 class AppState:
@@ -27,7 +30,11 @@ class AppState:
     vector_store: Any
     sparse_index: Any
     export_engine: Any
+    session_store: SessionStore
+    document_registry: DocumentRegistry
+    document_intelligence: DocumentIntelligenceService
     startup_ms: float
+    selected_chat_model: str = "bitnet-b1.58-2b"
     selected_vlm_id: str = "smolvlm-256m"
     streamsync_rss_feeds: list[str] = []
     directory_watcher: Any = None
@@ -62,10 +69,12 @@ class ChatResponse(BaseModel):
     policy_decisions: list[dict[str, Any]] = Field(default_factory=list)
     causal_graph: dict[str, Any] | None = None
     faithfulness_score: float | None = None
+    reasoning_summary: str | None = None
     reasoning_trace: str | None = None
     answer_text: str | None = None
     citations: list[ChatCitation] = Field(default_factory=list)
     attachments: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 class RefineRequest(BaseModel):

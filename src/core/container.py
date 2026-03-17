@@ -5,6 +5,7 @@ from typing import Any
 import structlog
 
 from src.config import AetherForgeSettings, get_settings
+from src.settings_store import load_saved_settings
 
 logger = structlog.get_logger("aetherforge.core.container")
 
@@ -47,11 +48,13 @@ class Container:
         from src.learning.history_manager import HistoryManager
         from src.learning.replay_buffer import ReplayBuffer
         from src.meta_agent import MetaAgent
+        from src.modules.document_registry import DocumentRegistry
         from src.modules.export_engine import ExportEngine
         from src.modules.ragforge.sparse_index import SparseIndex
         from src.modules.session_store import SessionStore
         from src.modules.sync.event_log import EventLog
         from src.modules.sync.sync_manager import SyncManager
+        from src.services.document_intelligence import DocumentIntelligenceService
 
         logger.info("Initializing services in Container")
 
@@ -75,6 +78,10 @@ class Container:
         # Sparse Index
         sparse_index = SparseIndex(db_path=self.settings.data_dir / "sparse_index.db")
         self.register_service("sparse_index", sparse_index)
+
+        # Document Registry
+        document_registry = DocumentRegistry(db_path=self.settings.data_dir / "document_registry.db")
+        self.register_service("document_registry", document_registry)
 
         # Session Store & Export Engine
         session_store = SessionStore(
@@ -100,6 +107,24 @@ class Container:
         )
         await meta_agent.initialize()
         self.register_service("meta_agent", meta_agent)
+
+        # Persisted runtime selections
+        saved_settings = load_saved_settings()
+        app_state.selected_chat_model = str(
+            saved_settings.get("SELECTED_CHAT_MODEL", "bitnet-b1.58-2b")
+        )
+        app_state.selected_vlm_id = str(saved_settings.get("SELECTED_VLM_ID", "smolvlm-256m"))
+        meta_agent.selected_chat_model = app_state.selected_chat_model
+
+        # Document Intelligence
+        document_intelligence = DocumentIntelligenceService(
+            settings=self.settings,
+            vector_store=vector_store,
+            sparse_index=sparse_index,
+            document_registry=document_registry,
+            selected_vlm_id_getter=lambda: app_state.selected_vlm_id,
+        )
+        self.register_service("document_intelligence", document_intelligence)
 
         # 7. Sync Manager
         node_id_file = self.settings.data_dir / "node_id.txt"
@@ -151,6 +176,8 @@ class Container:
         app_state.export_engine = self.get_service("export_engine")
         app_state.colosseum = self.get_service("colosseum")
         app_state.meta_agent = self.get_service("meta_agent")
+        app_state.document_registry = self.get_service("document_registry")
+        app_state.document_intelligence = self.get_service("document_intelligence")
 
     async def shutdown_all(self) -> None:
         """Gracefully shut down all services."""

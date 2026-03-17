@@ -39,8 +39,8 @@ def test_generate_tool_grammar_restricts_name_to_registered_tools():
         ]
     )
 
-    assert 'tool_call ::= "{" ws "\\"name\\"" ws ":" ws tool_name' in grammar
-    assert 'tool_name ::= "\\"search_web\\"" | "\\"get_weather\\""' in grammar
+    assert 'tool-call ::= "{" ws "\\"name\\"" ws ":" ws tool-name' in grammar
+    assert 'tool-name ::= "\\"search_web\\"" | "\\"get_weather\\""' in grammar
 
 
 def test_extract_attachment_names_deduplicates_embedded_tags():

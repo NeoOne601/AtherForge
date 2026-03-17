@@ -546,8 +546,8 @@ def load_document(filepath: Path) -> list[Document]:
     """
     Smart document router:
       .pdf, .xlsx, .xls  → Docling (default)
-      .csv               → CSVLoader
-      .txt/.md           → TextLoader
+      .csv/.tsv          → Delimited loader
+      .txt/.md/.json     → TextLoader
     """
     ext = filepath.suffix.lower()
 
@@ -585,18 +585,18 @@ def load_document(filepath: Path) -> list[Document]:
 
             return chunks, image_pages
 
-        elif ext == ".csv":
+        elif ext in (".csv", ".tsv"):
             from langchain_community.document_loaders import CSVLoader
 
-            loader = CSVLoader(str(filepath))
+            loader = CSVLoader(str(filepath), csv_args={"delimiter": "\t" if ext == ".tsv" else ","})
             docs = loader.load()
             for doc in docs:
                 doc.metadata["source"] = filepath.name
                 doc.metadata["chunk_type"] = "table"
-                doc.metadata["parser"] = "csvloader"
+                doc.metadata["parser"] = "csvloader" if ext == ".csv" else "tsvloader"
             return docs, []
 
-        elif ext in (".txt", ".md"):
+        elif ext in (".txt", ".md", ".json"):
             from langchain_community.document_loaders import TextLoader
             from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -611,7 +611,7 @@ def load_document(filepath: Path) -> list[Document]:
             for chunk in chunks:
                 chunk.metadata["source"] = filepath.name
                 chunk.metadata["chunk_type"] = "section"
-                chunk.metadata["parser"] = "textloader"
+                chunk.metadata["parser"] = "jsonloader" if ext == ".json" else "textloader"
             return chunks, []
 
         else:

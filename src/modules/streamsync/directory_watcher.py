@@ -3,24 +3,25 @@ import time
 from pathlib import Path
 from typing import Any
 
-import structlog
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+import structlog # type: ignore
+from watchdog.events import FileSystemEventHandler # type: ignore
+from watchdog.observers import Observer # type: ignore
 
-from src.modules.ragforge_indexer import index_document
-from src.modules.streamsync.graph import emit_event
+from src.modules.streamsync.graph import emit_event # type: ignore
 
 logger = structlog.get_logger("aetherforge.streamsync.watcher")
 
 
 class AutoIndexHandler(FileSystemEventHandler):
     def __init__(
-        self, watch_dir: Path, loop: asyncio.AbstractEventLoop, vector_store: Any, sparse_index: Any
+        self,
+        watch_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        app_state: object,
     ):
         self.watch_dir = watch_dir
         self.loop = loop
-        self.vector_store = vector_store
-        self.sparse_index = sparse_index
+        self.app_state = app_state
         self._lock = asyncio.Lock()  # Prevent concurrent heavy indexing tasks
 
     def on_created(self, event):
@@ -50,20 +51,20 @@ class AutoIndexHandler(FileSystemEventHandler):
     async def async_index(self, file_path: Path) -> None:
         async with self._lock:
             try:
-                if self.vector_store is None or self.sparse_index is None:
-                    logger.error("Vector components not provided to watcher. Delaying index.")
+                document_intelligence = getattr(self.app_state, "document_intelligence", None)
+                if document_intelligence is None:
+                    logger.error("Document intelligence service not ready. Delaying index.")
                     return
 
-                result = await asyncio.to_thread(
-                    index_document, file_path, self.vector_store, self.sparse_index
-                )
-
-                chunks_added = (
-                    result.get("chunks_added", 0) if isinstance(result, dict) else int(result)
-                )
+                result = await document_intelligence.ingest_path(file_path)
+                chunks_added = int(result.get("chunks_added", 0))
+                status = str(result.get("ingest_status", "ready"))
 
                 logger.info(
-                    "StreamSync Auto-Indexed '%s' — %d chunks", file_path.name, chunks_added
+                    "StreamSync Auto-Indexed '%s' — %d chunks (%s)",
+                    file_path.name,
+                    chunks_added,
+                    status,
                 )
 
                 # Emit event to the StreamSync HUD
@@ -73,7 +74,7 @@ class AutoIndexHandler(FileSystemEventHandler):
                     payload={
                         "filename": file_path.name,
                         "chunks": chunks_added,
-                        "status": "success",
+                        "status": status,
                     },
                 )
             except Exception as e:
@@ -89,17 +90,23 @@ class StreamSyncDirectoryWatcher:
     """Manages the watchdog observer for the AetherForge-Live folder."""
 
     def __init__(
-        self, watch_dir: Path, loop: asyncio.AbstractEventLoop, vector_store: Any, sparse_index: Any
+        self,
+        watch_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        app_state: object,
     ):
         self.watch_dir = Path(watch_dir)
         self.watch_dir.mkdir(parents=True, exist_ok=True)
         self.loop = loop
         self.observer = Observer()
-        self.handler = AutoIndexHandler(self.watch_dir, self.loop, vector_store, sparse_index)
+        from concurrent.futures import Future
+        self.handler = AutoIndexHandler(self.watch_dir, self.loop, app_state)
+        self._boot_task: Future[Any] | None = None
+        self._is_stopping = False
 
     def start(self):
         # 1. Start a throttled boot-sweep task
-        asyncio.run_coroutine_threadsafe(self._boot_sweep(), self.loop)
+        self._boot_task = asyncio.run_coroutine_threadsafe(self._boot_sweep(), self.loop)
 
         # 2. Watch for any new incoming files
         self.observer.schedule(self.handler, str(self.watch_dir), recursive=False)
@@ -108,29 +115,40 @@ class StreamSyncDirectoryWatcher:
 
     async def _boot_sweep(self):
         """Throttled ingestion of existing files to prevent CPU/RAM spikes on startup."""
-        print(f"DEBUG: _boot_sweep: checking {self.watch_dir}", flush=True)
+        if self._is_stopping:
+            return
+
         existing_files = [
             f for f in self.watch_dir.iterdir() if f.is_file() and not f.name.startswith(".")
         ]
-        print(
-            f"DEBUG: _boot_sweep: found {len(existing_files)} files: {[f.name for f in existing_files]}",
-            flush=True,
-        )
         if not existing_files:
             return
 
         logger.info("StreamSync Boot-Sweep: scheduling %d files (5s interval)", len(existing_files))
         for i, filepath in enumerate(existing_files):
-            # We don't need run_coroutine_threadsafe here because _boot_sweep
-            # is ALREADY running on the main event loop.
-            print(f"DEBUG: _boot_sweep: indexing {filepath.name}", flush=True)
+            if self._is_stopping:
+                break
+
             await self.handler.async_index(filepath)
 
             # Wait 5 seconds between each background document to keep system responsive
             if i < len(existing_files) - 1:
-                await asyncio.sleep(5.0)
+                try:
+                    await asyncio.sleep(5.0)
+                except asyncio.CancelledError:
+                    break
 
     def stop(self):
+        self._is_stopping = True
+        # Cancel the boot sweep future if it hasn't finished
+        boot_task = self._boot_task
+        if boot_task is not None and not boot_task.done():
+            boot_task.cancel()
+            
         self.observer.stop()
-        self.observer.join()
+        try:
+            # Short timeout to prevent hanging the whole shutdown process
+            self.observer.join(timeout=2.0)
+        except Exception:
+            pass
         logger.info("StreamSync Directory Watcher stopped.")

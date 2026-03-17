@@ -14,6 +14,153 @@ def _ensure_module(name: str) -> types.ModuleType:
     return module
 
 
+def _install_global_test_stubs() -> None:
+    watchdog_mod = _ensure_module("watchdog")
+    watchdog_events = _ensure_module("watchdog.events")
+    watchdog_observers = _ensure_module("watchdog.observers")
+
+    class FileSystemEventHandler:
+        pass
+
+    class Observer:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+    watchdog_events.FileSystemEventHandler = FileSystemEventHandler
+    watchdog_observers.Observer = Observer
+    watchdog_mod.events = watchdog_events
+    watchdog_mod.observers = watchdog_observers
+
+    bs4_mod = _ensure_module("bs4")
+
+    class BeautifulSoup:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def find_all(self, *args, **kwargs):
+            return []
+
+    bs4_mod.BeautifulSoup = BeautifulSoup
+
+    websockets_mod = _ensure_module("websockets")
+
+    class _DummyWebSocketConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, *args, **kwargs):
+            return None
+
+        async def recv(self):
+            return "{}"
+
+    def connect(*args, **kwargs):
+        return _DummyWebSocketConnection()
+
+    websockets_mod.connect = connect
+
+    zeroconf_mod = _ensure_module("zeroconf")
+
+    class Zeroconf:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def register_service(self, *args, **kwargs):
+            return None
+
+        def unregister_service(self, *args, **kwargs):
+            return None
+
+        def close(self):
+            return None
+
+        def get_service_info(self, *args, **kwargs):
+            return None
+
+    class ServiceInfo:
+        def __init__(self, *args, **kwargs):
+            self.addresses = kwargs.get("addresses", [])
+            self.port = kwargs.get("port", 0)
+
+    class ServiceBrowser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _IPVersion:
+        V4Only = "V4Only"
+
+    class _ServiceStateChange:
+        Added = "Added"
+        Removed = "Removed"
+
+    class NonUniqueNameException(Exception):
+        pass
+
+    zeroconf_mod.Zeroconf = Zeroconf
+    zeroconf_mod.ServiceInfo = ServiceInfo
+    zeroconf_mod.ServiceBrowser = ServiceBrowser
+    zeroconf_mod.IPVersion = _IPVersion
+    zeroconf_mod.ServiceStateChange = _ServiceStateChange
+    zeroconf_mod.NonUniqueNameException = NonUniqueNameException
+
+    multipart_mod = _ensure_module("multipart")
+    multipart_mod.__version__ = "0.0-test"
+    multipart_submod = _ensure_module("multipart.multipart")
+
+    def parse_options_header(value):
+        return value, {}
+
+    multipart_submod.parse_options_header = parse_options_header
+    multipart_mod.multipart = multipart_submod
+
+    langchain_core = _ensure_module("langchain_core")
+    messages_mod = _ensure_module("langchain_core.messages")
+    documents_mod = _ensure_module("langchain_core.documents")
+
+    class _BaseMessage:
+        def __init__(self, content=None, **kwargs):
+            self.content = content
+            self.kwargs = kwargs
+
+    class SystemMessage(_BaseMessage):
+        pass
+
+    class HumanMessage(_BaseMessage):
+        pass
+
+    class AIMessage(_BaseMessage):
+        pass
+
+    class Document:
+        def __init__(self, page_content="", metadata=None, **kwargs):
+            self.page_content = page_content
+            self.metadata = metadata or {}
+            self.kwargs = kwargs
+
+    messages_mod.SystemMessage = SystemMessage
+    messages_mod.HumanMessage = HumanMessage
+    messages_mod.AIMessage = AIMessage
+    documents_mod.Document = Document
+    langchain_core.messages = messages_mod
+    langchain_core.documents = documents_mod
+
+
+_install_global_test_stubs()
+
+
 @pytest.fixture(autouse=True)
 def mock_heavy_deps(monkeypatch, tmp_path):
     """

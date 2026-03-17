@@ -33,7 +33,8 @@ export default function App() {
     const [selectedChatModel, setSelectedChatModel] = useState<string>("");
     const [isChangingChatModel, setIsChangingChatModel] = useState(false);
     const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-    const [deepReasoningEnabled, setDeepReasoningEnabled] = useState(false);
+    const [deepResearchEnabled, setDeepResearchEnabled] = useState(false);
+    const [improveAnswerEnabled, setImproveAnswerEnabled] = useState(false);
     const [analyticsEnabled, setAnalyticsEnabled] = useState(false);
     const [grammarAssistEnabled, setGrammarAssistEnabled] = useState(false);
 
@@ -77,13 +78,13 @@ export default function App() {
         streamsync: null,
         tunelab: null
     });
-    const [loadedSessionMessages, setLoadedSessionMessages] = useState<StoredMessage[] | null>(null);
+    const [loadedSessionMessages, setLoadedSessionMessages] = useState<StoredMessage[] | null>([]);
     const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
     const [editingTitle, setEditingTitle] = useState("");
 
-    const refreshSessions = useCallback(async () => {
+    const refreshSessions = useCallback(async (moduleId?: string) => {
         try {
-            const res = await fetch(`/api/v1/sessions?module=${activeModule}`);
+            const res = await fetch(`/api/v1/sessions?module=${moduleId || activeModule}`);
             if (res.ok) setSessions(await res.json());
         } catch { /* non-fatal */ }
     }, [activeModule]);
@@ -95,8 +96,29 @@ export default function App() {
         try {
             const res = await fetch(`/api/v1/sessions/${sessionId}/messages`);
             if (res.ok) setLoadedSessionMessages(await res.json());
-        } catch { /* non-fatal */ }
+            else setLoadedSessionMessages([]);
+        } catch { setLoadedSessionMessages([]); }
     };
+
+    const createNewSession = useCallback(async (moduleId: string = activeModule) => {
+        try {
+            const res = await fetch("/api/v1/sessions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ module: moduleId }),
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            setActiveSessionIds(prev => ({ ...prev, [moduleId]: data.id }));
+            if (moduleId === activeModule) {
+                setLoadedSessionMessages([]);
+            }
+            await refreshSessions(moduleId);
+            return data.id as string;
+        } catch {
+            return null;
+        }
+    }, [activeModule, refreshSessions]);
 
     const deleteSession = async (sessionId: string) => {
         if (!confirm("Delete this session and all its messages?")) return;
@@ -104,7 +126,7 @@ export default function App() {
         setSessions(s => s.filter(x => x.id !== sessionId));
         if (activeSessionIds[activeModule] === sessionId) {
             setActiveSessionIds(prev => ({ ...prev, [activeModule]: null }));
-            setLoadedSessionMessages(null);
+            setLoadedSessionMessages([]);
         }
     };
 
@@ -230,11 +252,11 @@ export default function App() {
                                     fetch(`/api/v1/sessions/${sid}/messages`)
                                         .then(r => r.json())
                                         .then(setLoadedSessionMessages)
-                                        .catch(() => setLoadedSessionMessages(null));
+                                        .catch(() => setLoadedSessionMessages([]));
                                 } else {
-                                    setLoadedSessionMessages(null);
+                                    setLoadedSessionMessages([]);
                                 }
-                                refreshSessions();
+                                refreshSessions(m.id);
                             }}
                         >
                             <div className="module-icon">{m.icon}</div>
@@ -280,6 +302,13 @@ export default function App() {
 
                     {sessionsPanelOpen && (
                         <div className="session-list">
+                            <button
+                                className="session-action-btn"
+                                style={{ width: "100%", marginBottom: "8px" }}
+                                onClick={() => createNewSession(activeModule)}
+                            >
+                                New Session
+                            </button>
                             {sessions.length === 0 && (
                                 <div className="session-empty">No sessions yet. Start chatting!</div>
                             )}
@@ -330,14 +359,18 @@ export default function App() {
                         preloadedMessages={loadedSessionMessages}
                         onSessionCreated={(id) => {
                             setActiveSessionIds(prev => ({ ...prev, [activeModule]: id }));
+                            setLoadedSessionMessages(prev => prev ?? []);
                             refreshSessions();
                         }}
                         webSearchEnabled={webSearchEnabled}
-                        deepReasoningEnabled={deepReasoningEnabled}
-                        onToggleDeepReasoning={() => setDeepReasoningEnabled(!deepReasoningEnabled)}
+                        deepResearchEnabled={deepResearchEnabled}
+                        onToggleDeepResearch={() => setDeepResearchEnabled(!deepResearchEnabled)}
+                        improveAnswerEnabled={improveAnswerEnabled}
+                        onToggleImproveAnswer={() => setImproveAnswerEnabled(!improveAnswerEnabled)}
                         analyticsEnabled={analyticsEnabled}
                         grammarAssist={grammarAssistEnabled}
                         onToggleGrammarAssist={() => setGrammarAssistEnabled(!grammarAssistEnabled)}
+                        onRequestSession={async () => await createNewSession(activeModule)}
                     />}
                     {activePanel === "chat" && activeModule === "logger" && <LoggerPanel />}
                     {activePanel === "insights" && <InsightsPanel />}

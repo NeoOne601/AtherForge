@@ -4,11 +4,38 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from src.services.chat_turns import resolve_chat_session
+
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
 
 class RenameSessionRequest(BaseModel):
     title: str
+
+
+class CreateSessionRequest(BaseModel):
+    module: str = "localbuddy"
+
+
+@router.post("")
+async def create_session(req: CreateSessionRequest, request: Request) -> JSONResponse:
+    state = request.app.state.app_state
+    session_id, _ = resolve_chat_session("ui-session-create", req.module)
+    state.session_store.create_session(module=req.module, session_id=session_id)
+    summary = state.session_store.list_sessions(module=req.module)
+    created = next((session for session in summary if session.id == session_id), None)
+    if created is None:
+        return JSONResponse({"id": session_id, "module": req.module, "title": "New Session"})
+    return JSONResponse(
+        {
+            "id": created.id,
+            "module": created.module,
+            "title": created.title,
+            "created_at": created.created_at,
+            "updated_at": created.updated_at,
+            "message_count": created.message_count,
+        }
+    )
 
 
 @router.get("")
@@ -34,7 +61,7 @@ async def list_sessions(request: Request, module: str | None = None) -> JSONResp
 async def delete_session(session_id: str, request: Request) -> JSONResponse:
     state = request.app.state.app_state
     state.session_store.delete_session(session_id)
-    state.meta_agent._session_memories.pop(session_id, None)
+    state.meta_agent.drop_session_state(session_id)
     return JSONResponse({"status": "deleted", "session_id": session_id})
 
 

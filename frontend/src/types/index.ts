@@ -37,10 +37,16 @@ export interface StoredMessage {
 }
 
 export interface RAGDoc {
+    document_id: string;
     name: string;
     status: string;
     tokens: string;
     active: boolean;
+    file_type?: string;
+    parser?: string;
+    chunk_count?: number;
+    image_pages_pending?: number;
+    last_error?: string | null;
 }
 
 export interface ReplayItem {
@@ -87,6 +93,7 @@ export interface Message {
     tool_calls?: ToolCall[];
     citations?: ChatCitation[];
     attachments?: string[];
+    suggestions?: string[];
 }
 
 // ── Constants ────────────────────────────────────────────────────

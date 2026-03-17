@@ -39,24 +39,37 @@ class ToolRegistry:
             return list(self._tools.values())
         return [self._tools[n] for n in names if n in self._tools]
 
-    def execute_tool(self, name: str, args: dict[str, Any], state: Any | None = None) -> Any:
-        """Execute a registered tool by name with provided arguments."""
+    def execute_tool(self, name: str, args: dict[str, Any], state: Any | None = None) -> str:
+        """
+        Execute a registered tool by name with provided arguments.
+        Returns a structured string result (JSON-like or clear text) that the 
+        MetaAgent can use for synthesis. 
+        """
         if name not in self._handlers:
             logger.error("Attempted to execute unregistered tool", name=name)
-            raise ValueError(f"Tool '{name}' is not registered.")
+            return f"Error: Tool '{name}' is not registered and cannot be used."
 
         handler = self._handlers[name]
         try:
-            # Check if handler accepts state
             import inspect
-
             sig = inspect.signature(handler)
+            
+            kwargs = {}
             if "state" in sig.parameters:
-                return handler(args, state=state)
-            return handler(args)
+                kwargs["state"] = state
+            
+            if "name" in sig.parameters:
+                # Some handlers (like CoreModule.execute_tool) need the tool name for routing
+                result = handler(name, args, **kwargs)
+            else:
+                # Some handlers (like planning_tools.write_todos) just need args and state
+                result = handler(args, **kwargs)
+            
+            return str(result)
         except Exception as e:
-            logger.exception("Error executing tool", name=name, error=str(e))
-            raise
+            logger.exception("Hardware-level tool failure", name=name, error=str(e))
+            # Return a machine-readable error string for the MetaAgent
+            return f"SYSTEM_ERROR: Tool '{name}' failed during execution. Error detail: {str(e)}"
 
 
 tool_registry = ToolRegistry()

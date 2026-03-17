@@ -22,9 +22,9 @@ class GrammarGenerator:
 
         tool_names = " | ".join(f'"\\"{tool["name"]}\\""' for tool in tools)
         gbnf = [
-            "root ::= ws tool_call ws",
-            'tool_call ::= "{" ws "\\"name\\"" ws ":" ws tool_name ws "," ws "\\"arguments\\"" ws ":" ws object ws "}"',
-            f"tool_name ::= {tool_names}",
+            "root ::= ws tool-call ws",
+            'tool-call ::= "{" ws "\\"name\\"" ws ":" ws tool-name ws "," ws "\\"arguments\\"" ws ":" ws object ws "}"',
+            f"tool-name ::= {tool_names}",
             'object ::= "{" ws (member (ws "," ws member)*)? ws "}"',
             'member ::= string ws ":" ws value',
             'array ::= "[" ws (value (ws "," ws value)*)? ws "]"',
@@ -41,6 +41,40 @@ class GrammarGenerator:
             'boolean ::= "true" | "false"',
             'null ::= "null"',
             'ws ::= [ \\t\\n\\r]*',
+        ]
+        return "\n".join(gbnf)
+
+    @staticmethod
+    def generate_agentic_grammar(tools: list[dict[str, Any]]) -> str:
+        """
+        Comprehensive grammar for an agentic turn:
+        <think>...</think> [JSON Tool Call] Final Answer
+        """
+        tool_names = " | ".join(f'"\\"{tool["name"]}\\""' for tool in tools) if tools else '"\\"None\\""'
+        
+        gbnf = [
+            "root ::= think (tool-json-block)? answer",
+            'think ::= "<think>" [^<]* "</think>" ws',
+            'tool-json-block ::= ("```json")? ws tool-call ws ("```")? ws',
+            'tool-call ::= "{" ws "\\"name\\"" ws ":" ws tool-name ws "," ws "\\"arguments\\"" ws ":" ws object ws "}"',
+            f"tool-name ::= {tool_names}",
+            'answer ::= [^\\x00]*',
+            'object ::= "{" ws (member (ws "," ws member)*)? ws "}"',
+            'member ::= string ws ":" ws value',
+            'array ::= "[" ws (value (ws "," ws value)*)? ws "]"',
+            'value ::= string | number | boolean | null | object | array',
+            'string ::= "\\"" chars "\\""',
+            'chars ::= "" | char chars',
+            'char ::= [^"\\\\\\x00-\\x1F] | "\\\\" escape',
+            'escape ::= ["\\\\/bfnrt] | "u" hex hex hex hex',
+            'hex ::= [0-9a-fA-F]',
+            'number ::= "-"? int frac? exp?',
+            'int ::= "0" | [1-9] [0-9]*',
+            'frac ::= "." [0-9]+',
+            'exp ::= [eE] [+-]? [0-9]+',
+            'boolean ::= "true" | "false"',
+            'null ::= "null"',
+            'ws ::= [ \t\n\r]*',
         ]
         return "\n".join(gbnf)
 
