@@ -23,7 +23,7 @@ from __future__ import annotations
 import gc
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 import psutil
 import structlog
@@ -33,14 +33,11 @@ logger = structlog.get_logger("aetherforge.ragforge_indexer")
 
 # ── Memory Governor ──────────────────────────────────────────────
 # Hard cap: never start an IN-PROCESS VLM if system memory exceeds this.
-# On 8GB macOS: baseline OS uses ~50% (4GB). At 85% ceiling = 6.8GB.
-# NOTE: Ollama runs as a SEPARATE OS process and is NOT subject to this
-# ceiling — it manages its own memory. Only in-process HuggingFace models
-# (SmolVLM, Florence, QwenVL) are gated by this check.
-MEMORY_CEILING_PCT = 85.0
-# Ollama-based VLMs are out-of-process; use a higher threshold since they
-# don't load into Python's heap at all.
-MEMORY_CEILING_PCT_OLLAMA = 97.0
+# On 8GB macOS: baseline OS uses ~50% (4GB). At 80% ceiling = 6.4GB.
+# This 5% reduction prevents the OS from hitting the "Compressed Memory Wall".
+MEMORY_CEILING_PCT = 80.0
+# Ollama-based VLMs are out-of-process; use a higher threshold.
+MEMORY_CEILING_PCT_OLLAMA = 95.0
 
 
 def _check_memory_budget(label: str = "VLM", is_ollama: bool = False) -> bool:
@@ -136,9 +133,10 @@ def _analyze_pdf(filepath: Path) -> dict:
         gc.collect()  # Ensure fitz handle is released quickly
 
 
-def load_with_docling(filepath: Path) -> list[Document]:
+def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Document]], None]] = None) -> list[Document]:
     """
     Use IBM Docling to extract structured content from a digital PDF.
+    Supports a chunk_callback for progressive indexing of large documents.
 
     Returns LangChain Documents with rich metadata:
       - chunk_type: 'section' | 'table' | 'equation' | 'figure_caption'
@@ -147,128 +145,202 @@ def load_with_docling(filepath: Path) -> list[Document]:
       - doc_type: 'text' | 'table' | 'formula' | 'picture'
     """
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions
+        import fitz
+        import gc
 
-        logger.info("Docling: converting '%s'...", filepath.name)
-        converter = DocumentConverter()
-        result = converter.convert(str(filepath))
-        doc = result.document
+        logger.info("Docling (Throttled Mode): converting '%s'...", filepath.name)
+        
+        # Configure resource-limited pipeline
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = True
+        pipeline_options.do_table_structure = True
+        pipeline_options.images_scale = 1.0
+        pipeline_options.generate_page_images = False
+        
+        # Disable expensive vision enrichments to save RAM
+        if hasattr(pipeline_options, "enrichment"):
+            pipeline_options.enrichment.do_picture_classification = False
+            pipeline_options.enrichment.do_formula_classification = False
+        
+        # Limit concurrency to prevent iMac freezing
+        pipeline_options.accelerator_options = AcceleratorOptions(
+            num_threads=1,
+            device="mps" # Keep MPS for speed, but limit threads
+        )
 
-        chunks: list[Document] = []
+        # ── XY-Cut++ Pre-Pass: build per-page layout map ─────────────
+        # Detects column structure before Docling to tag chunks
+        # with layout type ('single'|'double'|'table'|'image_heavy').
+        try:
+            from src.modules.ragforge.xycut_layout import detect_layout_type
+            pdf_doc = fitz.open(str(filepath))
+            total_pages = len(pdf_doc)
+            page_layout_map: dict[int, str] = {}
+            for pg_idx in range(total_pages):
+                page_layout_map[pg_idx + 1] = detect_layout_type(pdf_doc[pg_idx])
+            pdf_doc.close()
+            logger.info(
+                "XY-Cut++ layout scan: %d pages analysed for '%s'",
+                total_pages,
+                filepath.name,
+            )
+        except Exception as _xy_err:
+            logger.debug("XY-Cut++ pre-pass skipped: %s", _xy_err)
+            pdf_doc = fitz.open(str(filepath))
+            total_pages = len(pdf_doc)
+            pdf_doc.close()
+            page_layout_map = {}
+        
+        converter = DocumentConverter(
+            format_options={
+                "pdf": PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        all_chunks: list[Document] = []
         current_section = "Introduction"
+        # HTI: Hierarchical Tree Index state
+        section_path: list[str] = ["Root"]
+        section_ids: list[str] = [str(uuid.uuid4())]
+        batch_size = 10  # Reduced batch size for 8GB RAM stability
+        
+        for start_page in range(1, total_pages + 1, batch_size):
+            end_page = min(start_page + batch_size - 1, total_pages)
+            logger.info("Throttled Batch: pages %d to %d of %d", start_page, end_page, total_pages)
+            
+            # Use Docling's page_range (1-indexed)
+            result = converter.convert(str(filepath), page_range=(start_page, end_page))
+            doc = result.document
+            
+            batch_chunks: list[Document] = []
+            for item, _level in doc.iterate_items():
+                item_label = str(getattr(item, "label", "text")).lower()
+                item_text = ""
 
-        for item, _level in doc.iterate_items():
-            item_label = str(getattr(item, "label", "text")).lower()
-            item_text = ""
-
-            # Handle picture/image/figure items — extract captions and any text
-            # IMPORTANT: Do NOT skip these. Docling's PictureItem may contain
-            # caption text that is the ONLY representation of figures in the index.
-            if item_label in ("picture", "image", "figure"):
-                # Try to extract caption text from the item
-                caption_text = ""
-                if hasattr(item, "caption") and item.caption:
-                    cap = item.caption
-                    if hasattr(cap, "text"):
-                        caption_text = cap.text.strip()
-                    elif isinstance(cap, str):
-                        caption_text = cap.strip()
-                if not caption_text and hasattr(item, "text") and item.text:
-                    caption_text = item.text.strip()
-                if not caption_text:
-                    # Try export_to_markdown as last resort
-                    try:
-                        if hasattr(item, "export_to_markdown"):
-                            import inspect
-
-                            sig = inspect.signature(item.export_to_markdown)
-                            if "doc" in sig.parameters:
-                                caption_text = item.export_to_markdown(doc).strip()
-                            else:
-                                caption_text = item.export_to_markdown().strip()
-                    except Exception:
-                        pass
-                if caption_text:
-                    item_text = caption_text
-                    item_label = "figure_caption"  # override for proper chunk typing
-                else:
-                    # No text at all — use a placeholder so the figure is at least findable
-                    page_num = 0
-                    if hasattr(item, "prov") and item.prov:
-                        prov = item.prov[0] if isinstance(item.prov, list) else item.prov
-                        page_num = getattr(prov, "page_no", 0)
-                    item_text = f"[Figure on page {page_num}]"
-                    item_label = "figure_caption"
-
-            # Extract text content based on item type
-            elif hasattr(item, "text") and item.text:
-                item_text = item.text.strip()
-            elif hasattr(item, "export_to_markdown"):
-                try:
-                    # Tables and other rich items may need the doc reference
-                    import inspect
-
-                    sig = inspect.signature(item.export_to_markdown)
-                    if "doc" in sig.parameters:
-                        item_text = item.export_to_markdown(doc).strip()
+                # Handle images/figures
+                if item_label in ("picture", "image", "figure"):
+                    caption_text = ""
+                    if hasattr(item, "caption") and item.caption:
+                        cap = item.caption
+                        caption_text = (getattr(cap, "text", "") or str(cap)).strip()
+                    
+                    if not caption_text and hasattr(item, "text") and item.text:
+                        caption_text = item.text.strip()
+                        
+                    if not caption_text:
+                        try:
+                            if hasattr(item, "export_to_markdown"):
+                                import inspect
+                                sig = inspect.signature(item.export_to_markdown)
+                                caption_text = item.export_to_markdown(doc).strip() if "doc" in sig.parameters else item.export_to_markdown().strip()
+                        except Exception:
+                            pass
+                            
+                    if caption_text:
+                        item_text = caption_text
+                        item_label = "figure_caption"
                     else:
-                        item_text = item.export_to_markdown().strip()
-                except Exception as md_err:
-                    logger.debug("export_to_markdown failed for %s: %s", item_label, md_err)
-                    item_text = getattr(item, "text", "") or ""
-                    if isinstance(item_text, str):
-                        item_text = item_text.strip()
+                        page_no = 0
+                        if hasattr(item, "prov") and item.prov:
+                            prov = item.prov[0] if isinstance(item.prov, list) else item.prov
+                            page_no = getattr(prov, "page_no", 0)
+                        item_text = f"[Figure on page {page_no}]"
+                        item_label = "figure_caption"
 
-            if not item_text:
-                continue
+                # Standard text / rich items
+                elif hasattr(item, "text") and item.text:
+                    item_text = item.text.strip()
+                elif hasattr(item, "export_to_markdown"):
+                    try:
+                        import inspect
+                        sig = inspect.signature(item.export_to_markdown)
+                        item_text = item.export_to_markdown(doc).strip() if "doc" in sig.parameters else item.export_to_markdown().strip()
+                    except Exception as md_err:
+                        logger.debug("Markdown export failed: %s", md_err)
+                        item_text = (getattr(item, "text", "") or "").strip()
 
-            # Track section headings for citation metadata
-            if item_label in ("section_header", "title", "h1", "h2", "h3"):
-                current_section = item_text[:120]  # cap heading length
+                if not item_text:
+                    continue
 
-            # Map Docling label to our chunk type
-            if item_label in ("table",):
-                chunk_type = "table"
-                max_chars = MAX_TABLE_CHARS
-            elif item_label in ("formula", "equation"):
-                chunk_type = "equation"
-                max_chars = MAX_EQUATION_CHARS
-            elif item_label in ("caption", "figure_caption"):
-                chunk_type = "figure_caption"
-                max_chars = MAX_SECTION_CHARS
-            else:
+                # Heading detection & HTI Path management
+                if item_label in ("section_header", "title", "h1", "h2", "h3"):
+                    current_section = item_text[:120]
+                    level = getattr(item, "level", 1)  # 1-indexed hierarchical level
+                    
+                    # Update section path based on level
+                    # If level is 1, it's a top-level heading. If level is 2, it's a child, etc.
+                    while len(section_path) > level:
+                        section_path.pop()
+                        section_ids.pop()
+                    
+                    section_path.append(current_section)
+                    section_ids.append(str(uuid.uuid4()))
+
+                # Map to RAG chunk types
                 chunk_type = "section"
                 max_chars = MAX_SECTION_CHARS
+                if item_label == "table":
+                    chunk_type, max_chars = "table", MAX_TABLE_CHARS
+                elif item_label in ("formula", "equation"):
+                    chunk_type, max_chars = "equation", MAX_EQUATION_CHARS
+                elif item_label == "figure_caption":
+                    chunk_type = "figure_caption"
 
-            # Split only if chunk is unusually large (rare for Docling)
-            if len(item_text) > max_chars:
-                sub_chunks = _split_large_block(item_text, max_chars)
-            else:
-                sub_chunks = [item_text]
+                # Apply splitting
+                if len(item_text) > max_chars:
+                    sub_chunks = _split_table_block(item_text, max_chars) if chunk_type == "table" else _split_large_block(item_text, max_chars)
+                else:
+                    sub_chunks = [item_text]
 
-            for i, text in enumerate(sub_chunks):
-                # Extract page number from item's bounding box if available
-                page_num = 0
-                if hasattr(item, "prov") and item.prov:
-                    prov = item.prov[0] if isinstance(item.prov, list) else item.prov
-                    page_num = getattr(prov, "page_no", 0)
+                for idx, text in enumerate(sub_chunks):
+                    page_no = 0
+                    if hasattr(item, "prov") and item.prov:
+                        prov = item.prov[0] if isinstance(item.prov, list) else item.prov
+                        page_no = getattr(prov, "page_no", 0)
 
-                chunks.append(
-                    Document(
-                        page_content=text,
-                        metadata={
-                            "source": filepath.name,
-                            "chunk_type": chunk_type,
-                            "section": current_section,
-                            "page": page_num,
-                            "sub_index": i,
-                            "doc_label": item_label,
-                            "parser": "docling",
-                        },
+                    batch_chunks.append(
+                        Document(
+                            page_content=text,
+                            metadata={
+                                "source": filepath.name,
+                                "chunk_type": chunk_type,
+                                "section": current_section,
+                                "page": page_no,
+                                "sub_index": idx,
+                                "doc_label": item_label,
+                                "parser": "docling",
+                                # HTI Metadata
+                                "path": " / ".join(str(s) for s in section_path),
+                                "parent_id": str(section_ids[-2]) if len(section_ids) > 1 else None,
+                                "section_id": str(section_ids[-1]),
+                                # XY-Cut++ Layout Metadata
+                                "layout": page_layout_map.get(page_no, "single"),
+                            },
+                        )
                     )
-                )
 
-        logger.info("Docling extracted %d semantic chunks from '%s'", len(chunks), filepath.name)
+            
+            # Progressive commitment
+            if chunk_callback and batch_chunks:
+                chunk_callback(batch_chunks)
+                
+            all_chunks.extend(batch_chunks)
+            
+            # ── Explicitly unload backend to release OCR memory ──
+            try:
+                # Docling legacy check
+                if hasattr(result, "input") and hasattr(result.input, "_backend") and result.input._backend:
+                    result.input._backend.unload()
+            except Exception:
+                pass
+
+            # Cleanup batch resources
+            del result
+            del doc
+            gc.collect()
+
+        logger.info("Docling (Throttled) completed: %d total chunks for '%s'", len(all_chunks), filepath.name)
 
         # ── Post-processing: Figure & Table Reference Extraction ──
         # Scan ALL text chunks for in-text figure/table references
@@ -280,7 +352,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
         figure_registry: dict[str, dict] = {}
         table_registry: dict[str, dict] = {}
 
-        for chunk in chunks:
+        for chunk in all_chunks:
             text = chunk.page_content
             page = chunk.metadata.get("page", 0)
 
@@ -346,7 +418,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 parts.append(f"Pages: {', '.join(str(p) for p in sorted(info['pages']))}")
 
             fig_text = "\n".join(parts)
-            chunks.append(
+            all_chunks.append(
                 Document(
                     page_content=fig_text,
                     metadata={
@@ -373,7 +445,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
                     parts.append(f"  - {ref}")
 
             tab_text = "\n".join(parts)
-            chunks.append(
+            all_chunks.append(
                 Document(
                     page_content=tab_text,
                     metadata={
@@ -398,7 +470,7 @@ def load_with_docling(filepath: Path) -> list[Document]:
                 tab_count,
             )
 
-        return chunks
+        return all_chunks
 
     except ImportError:
         logger.warning("Docling not installed — falling back to PyPDFLoader")
@@ -517,13 +589,16 @@ def _load_with_pypdf(filepath: Path) -> list[Document]:
 def _split_large_block(text: str, max_chars: int) -> list[str]:
     """
     Split an oversized block at paragraph/sentence boundaries.
-    Only called for unusually large Docling items — rare.
     """
     if len(text) <= max_chars:
         return [text]
 
     sub_chunks = []
     paragraphs = text.split("\n\n")
+    if len(paragraphs) == 1:
+        # Fallback to single line splits if no paragraphs exist
+        paragraphs = text.split("\n")
+        
     current = ""
     for para in paragraphs:
         if len(current) + len(para) > max_chars and current:
@@ -531,10 +606,149 @@ def _split_large_block(text: str, max_chars: int) -> list[str]:
             current = para + "\n\n"
         else:
             current += para + "\n\n"
+            
     if current.strip():
         sub_chunks.append(current.strip())
 
     return sub_chunks or [text[:max_chars]]
+
+def _split_table_block(text: str, max_chars: int) -> list[str]:
+    """
+    Split an oversized markdown table while preserving the header row.
+    """
+    if len(text) <= max_chars:
+        return [text]
+        
+    lines = text.split("\n")
+    if len(lines) < 3 or "|" not in lines[0]:
+        return _split_large_block(text, max_chars)
+        
+    header = lines[0] + "\n" + lines[1] + "\n"
+    sub_chunks = []
+    current = header
+    
+    for row in lines[2:]:
+        if len(current) + len(row) > max_chars and current != header:
+            sub_chunks.append(current.strip())
+            current = header + row + "\n"
+        else:
+            current += row + "\n"
+            
+    if current.strip() != header.strip():
+        sub_chunks.append(current.strip())
+        
+    return sub_chunks or [text[:max_chars]]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Scanned PDF OCR Fallback (no Ollama required)
+# Uses ocrmac (bundled on macOS) → pytesseract → raw text as last resort
+# ─────────────────────────────────────────────────────────────────
+
+def _load_scanned_pdf_with_ocr(filepath: Path, chunk_callback: Optional[Callable[[list[Document]], None]] = None) -> list[Document]:
+    """
+    Renders each page of a scanned PDF to an image and runs offline OCR.
+    Cascade: ocrmac (installed on macOS) → pytesseract → raw PyMuPDF text.
+    Emits chunk_callback batches per page for real-time progress updates.
+    """
+    import fitz
+    import io
+    import re as _re
+
+    doc = fitz.open(str(filepath))
+    total_pages = len(doc)
+    all_chunks: list[Document] = []
+
+    logger.info("Offline OCR fallback: scanning %d pages from '%s'", total_pages, filepath.name)
+
+    for page_idx in range(total_pages):
+        page = doc[page_idx]
+        page_no = page_idx + 1
+        page_text = ""
+
+        # Strategy 1: Get native text from PyMuPDF (often works partially)
+        native_text = page.get_text("text").strip()
+        if len(native_text) > 40:  # Has meaningful text already
+            page_text = native_text
+        else:
+            # Strategy 2: Render to image → ocrmac (macOS native, fast)
+            try:
+                import ocrmac
+                mat = fitz.Matrix(2.0, 2.0)  # 2x scale for better OCR accuracy
+                pix = page.get_pixmap(matrix=mat)
+                img_bytes = pix.tobytes("png")
+                page_text = ocrmac.OCR(io.BytesIO(img_bytes)).text
+            except Exception as ocrmac_err:
+                logger.debug("ocrmac failed page %d: %s", page_no, ocrmac_err)
+                # Strategy 3: pytesseract fallback
+                try:
+                    from PIL import Image
+                    import pytesseract
+                    mat = fitz.Matrix(2.0, 2.0)
+                    pix = page.get_pixmap(matrix=mat)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    page_text = pytesseract.image_to_string(img)
+                except Exception as tess_err:
+                    logger.debug("pytesseract failed page %d: %s", page_no, tess_err)
+                    page_text = native_text or f"[Page {page_no}: OCR unavailable]"
+
+        if not page_text.strip():
+            continue
+
+        # Split extracted text into semantic chunks (~1000 chars with paragraph awareness)
+        paragraphs = _re.split(r"\n{2,}", page_text.strip())
+        current_block = ""
+        current_section = f"Page {page_no}"
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            # Detect short headings
+            is_heading = len(para) < 100 and not para.endswith(".")
+            if is_heading and current_block:
+                chunk = Document(
+                    page_content=f"[Section: {current_section}]\n\n{current_block.strip()}",
+                    metadata={"source": filepath.name, "chunk_type": "section",
+                               "section": current_section, "page": page_no,
+                               "sub_index": len(all_chunks), "parser": "ocr_fallback"},
+                )
+                all_chunks.append(chunk)
+                if chunk_callback:
+                    chunk_callback([chunk])
+                current_block = ""
+                current_section = para[:100]
+                continue
+            if len(current_block) + len(para) > FALLBACK_CHUNK_SIZE and current_block:
+                chunk = Document(
+                    page_content=f"[Section: {current_section}]\n\n{current_block.strip()}",
+                    metadata={"source": filepath.name, "chunk_type": "section",
+                               "section": current_section, "page": page_no,
+                               "sub_index": len(all_chunks), "parser": "ocr_fallback"},
+                )
+                all_chunks.append(chunk)
+                if chunk_callback:
+                    chunk_callback([chunk])
+                current_block = current_block[-200:] + "\n\n" + para + "\n\n"
+            else:
+                current_block += para + "\n\n"
+
+        if current_block.strip():
+            chunk = Document(
+                page_content=f"[Section: {current_section}]\n\n{current_block.strip()}",
+                metadata={"source": filepath.name, "chunk_type": "section",
+                           "section": current_section, "page": page_no,
+                           "sub_index": len(all_chunks), "parser": "ocr_fallback"},
+            )
+            all_chunks.append(chunk)
+            if chunk_callback:
+                chunk_callback([chunk])
+
+        gc.collect()
+
+    doc.close()
+    logger.info("OCR fallback: %d chunks extracted from '%s'", len(all_chunks), filepath.name)
+    return all_chunks
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -542,12 +756,19 @@ def _split_large_block(text: str, max_chars: int) -> list[str]:
 # ─────────────────────────────────────────────────────────────────
 
 
-def load_document(filepath: Path) -> list[Document]:
+def load_document(
+    filepath: Path,
+    chunk_callback: Optional[Callable[[list[Document]], None]] = None,
+) -> tuple[list[Document], list[int]]:
     """
     Smart document router:
       .pdf, .xlsx, .xls  → Docling (default)
       .csv/.tsv          → Delimited loader
       .txt/.md/.json     → TextLoader
+
+    Returns:
+      Tuple of (chunks, image_pages) where image_pages is a list of
+      0-indexed page numbers that should be enriched by an async VLM pass.
     """
     ext = filepath.suffix.lower()
 
@@ -557,24 +778,44 @@ def load_document(filepath: Path) -> list[Document]:
                 analysis = _analyze_pdf(filepath)
 
                 if analysis["is_scanned"]:
-                    # Purely scanned — VLM must read every page
-                    logger.info("'%s' is scanned — full VLM processing needed", filepath.name)
-                    # Return all pages as image_pages for async VLM processing
-                    import fitz
-
-                    pdf_doc = fitz.open(str(filepath))
-                    all_pages = list(range(len(pdf_doc)))
-                    pdf_doc.close()
-                    return [], all_pages  # No text chunks, all pages need VLM
+                    logger.info(
+                        "'%s' is fully scanned (%d image pages) — trying Docling first, "
+                        "then offline OCR fallback if needed.",
+                        filepath.name, analysis.get("total_images", 0)
+                    )
             else:
                 # Excel files don't need scanned analysis
-                analysis = {"has_images": False, "image_pages": []}
+                analysis = {"has_images": False, "image_pages": [], "is_scanned": False}
 
-            # Digital PDF or Excel — Docling handles all text extraction
-            chunks = load_with_docling(filepath)
+            # Digital PDF or Excel — Docling/PyPDF handles all text extraction
+            chunks = load_with_docling(filepath, chunk_callback=chunk_callback)
 
-            # Return image_pages for async VLM processing
-            image_pages = analysis.get("image_pages", []) if analysis.get("has_images") else []
+            # --- Scanned PDF OCR Fallback ---
+            # If Docling produces 0 chunks on a fully scanned PDF, use offline OCR.
+            # This ensures we ALWAYS get usable content even when Ollama is offline.
+            if analysis.get("is_scanned") and len(chunks) == 0:
+                logger.warning(
+                    "'%s' produced 0 Docling chunks — activating offline OCR fallback (ocrmac/pytesseract)",
+                    filepath.name
+                )
+                chunks = _load_scanned_pdf_with_ocr(filepath, chunk_callback=chunk_callback)
+                if chunks:
+                    logger.info(
+                        "Offline OCR fallback produced %d chunks for '%s'",
+                        len(chunks), filepath.name
+                    )
+                    # For scanned docs processed via OCR: no VLM image_pages needed
+                    return chunks, []
+
+            # --- Selective VLM Routing (OpenDataLoader Pattern) ---
+            # Route ONLY specific pages that need VLM enrichment.
+            if analysis.get("is_scanned") and len(chunks) > 0:
+                # Scanned but Docling got text: VLM would be redundant — skip
+                image_pages: list[int] = []
+            else:
+                # Precision routing: only pages with embedded images/tables
+                image_pages = list(analysis.get("image_pages", []))
+                
             if image_pages:
                 logger.info(
                     "Hybrid mode: Docling extracted %d text chunks, "
@@ -636,20 +877,57 @@ def load_document(filepath: Path) -> list[Document]:
 # ─────────────────────────────────────────────────────────────────
 
 
-def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) -> dict[str, Any]:
+def index_document(
+    filepath: Path,
+    vector_store: Any,
+    sparse_index: Any = None,
+    document_registry: Any = None,
+    force: bool = False,
+) -> dict[str, Any]:
     """
     Fast Ingestion pipeline:
-      1. Delete existing chunks for this source (deduplication guard)
-      2. Load + semantically chunk (Docling text extraction)
-      3. Embed with all-MiniLM-L6-v2 and store in ChromaDB
-      4. Write to FTS5 sparse index (uses shared AppState singleton when provided)
-      5. Return image_pages for async VLM processing
+      1. Idempotency Guard — skip re-indexing if doc is already ready/partial
+         and the file's mtime hasn't changed since last index (boot-sweep fix).
+      2. Delete existing chunks for this source (deduplication guard)
+      3. Load + semantically chunk (Docling text extraction → OCR fallback)
+      4. Embed with all-MiniLM-L6-v2 and store in ChromaDB
+      5. Write to FTS5 sparse index (uses shared AppState singleton when provided)
+      6. Return image_pages for async VLM processing
     """
+    import os
     logger.info("RAGForge Precision Ingestion — indexing: %s", filepath.name)
 
-    # ── Step 0: Deduplicate — delete existing chunks for this source ──
-    # This prevents chunk accumulation when a user re-uploads the same document.
     source_name = filepath.name
+
+    # ── Step 0: Idempotency Guard (Boot-Sweep Protection) ────────────
+    # If the document is already indexed (ready/partial) and the file on disk
+    # has NOT changed since the last index, skip re-indexing entirely.
+    # This prevents the "reset to 0" bug caused by boot-sweep re-running on restart.
+    if not force and document_registry is not None:
+        try:
+            existing_record = document_registry.get_by_source(source_name)
+            if existing_record and existing_record.ingest_status in ("ready", "partial") and existing_record.chunk_count > 0:
+                # Check file modification time
+                current_mtime = os.path.getmtime(str(filepath))
+                last_indexed = getattr(existing_record, "last_indexed_mtime", None)
+                if last_indexed is not None and abs(current_mtime - last_indexed) < 1.0:
+                    logger.info(
+                        "Idempotency Guard: '%s' already indexed with %d chunks (status=%s, file unchanged) — skipping.",
+                        source_name, existing_record.chunk_count, existing_record.ingest_status,
+                    )
+                    return {
+                        "file": source_name,
+                        "chunks_added": existing_record.chunk_count,
+                        "skipped": True,
+                        "parser": "cached",
+                        "chunk_breakdown": {},
+                        "image_pages": [],
+                    }
+        except Exception as guard_err:
+            logger.debug("Idempotency guard check failed (non-fatal): %s", guard_err)
+
+    # ── Step 1: Deduplicate — delete existing chunks for this source ──
+    # This prevents chunk accumulation when a user re-uploads the same document.
     try:
         # ChromaDB dedup: delete by source metadata
         existing = vector_store.get(where={"source": source_name})
@@ -671,8 +949,39 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
         except Exception as dedup_err:
             logger.warning("FTS5 dedup failed (non-fatal): %s", dedup_err)
 
+    # Define progressive commitment callback
+    def commit_chunks(batch: list[Document]):
+        if not batch:
+            return
+            
+        # Inject stable source metadata
+        parser = batch[0].metadata.get("chunk_id_prefix", "docling") # fallback
+        for chunk in batch:
+            chunk.metadata.setdefault("source", filepath.name)
+            chunk.metadata.setdefault("chunk_type", "section")
+            chunk.metadata.setdefault("section", "Unknown")
+            chunk.metadata.setdefault("page", 0)
+            chunk.metadata["chunk_id"] = str(uuid.uuid4())
+            # parser is already in metadata from load_with_docling
+
+        # Embed and store in ChromaDB
+        logger.info("Committing %d chunks to vector store...", len(batch))
+        vector_store.add_documents(batch)
+
+        # FTS5 Sparse Index
+        try:
+            if sparse_index is not None:
+                sparse_index.add_documents(batch)
+            else:
+                from src.modules.ragforge.sparse_index import SparseIndex
+                sparse_idx = SparseIndex(db_path=filepath.parent.parent / "sparse_index.db")
+                sparse_idx.add_documents(batch)
+                sparse_idx.close()
+        except Exception as fts_err:
+            logger.warning("FTS5 batch indexing failed: %s", fts_err)
+
     # Load via smart router — returns (chunks, image_pages)
-    result = load_document(filepath)
+    result = load_document(filepath, chunk_callback=commit_chunks)
     if isinstance(result, tuple):
         chunks, image_pages = result
     else:
@@ -692,35 +1001,6 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
             }
         return {"file": filepath.name, "chunks_added": 0, "error": "extraction_failed"}
 
-    # Inject stable source metadata
-    parser = chunks[0].metadata.get("parser", "unknown") if chunks else "unknown"
-    for chunk in chunks:
-        chunk.metadata.setdefault("source", filepath.name)
-        chunk.metadata.setdefault("chunk_type", "section")
-        chunk.metadata.setdefault("section", "Unknown")
-        chunk.metadata.setdefault("page", 0)
-        chunk.metadata["chunk_id"] = str(uuid.uuid4())
-        chunk.metadata["parser"] = parser  # store parser for traceability
-
-    # Embed and store in ChromaDB
-    logger.info("Embedding %d chunks...", len(chunks))
-    vector_store.add_documents(chunks)
-
-    # ── FTS5 Sparse Index: use shared singleton or create local instance ──
-    try:
-        if sparse_index is not None:
-            sparse_index.add_documents(chunks)
-            logger.info("FTS5 sparse index updated via shared singleton (%d chunks)", len(chunks))
-        else:
-            from src.modules.ragforge.sparse_index import SparseIndex
-
-            sparse_idx = SparseIndex(db_path=filepath.parent.parent / "sparse_index.db")
-            sparse_idx.add_documents(chunks)
-            sparse_idx.close()
-            logger.info("FTS5 sparse index updated with %d chunks", len(chunks))
-    except Exception as fts_err:
-        logger.warning("FTS5 indexing failed (non-fatal): %s", fts_err)
-
     # Build summary by chunk type
     type_counts: dict[str, int] = {}
     for chunk in chunks:
@@ -729,12 +1009,19 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
 
     parser = chunks[0].metadata.get("parser", "unknown") if chunks else "unknown"
     logger.info(
-        "Indexed '%s' — %d chunks via %s | breakdown: %s",
+        "Indexed '%s' — %d chunks TOTAL via %s | breakdown: %s",
         filepath.name,
         len(chunks),
         parser,
         type_counts,
     )
+
+    # Record file mtime so the idempotency guard can detect future changes
+    import os
+    try:
+        file_mtime = os.path.getmtime(str(filepath))
+    except Exception:
+        file_mtime = None
 
     return {
         "file": filepath.name,
@@ -742,4 +1029,6 @@ def index_document(filepath: Path, vector_store: Any, sparse_index: Any = None) 
         "parser": parser,
         "chunk_breakdown": type_counts,
         "image_pages": image_pages,
+        "pending_image_pages": len(image_pages),
+        "last_indexed_mtime": file_mtime,
     }

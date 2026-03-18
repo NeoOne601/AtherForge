@@ -51,6 +51,7 @@ class DocumentIntelligenceService:
                 file_path,
                 self.vector_store,
                 self.sparse_index,
+                self.document_registry,   # enables boot-sweep idempotency guard
             )
         except Exception as exc:
             logger.exception("Document ingest failed", source=source, error=str(exc))

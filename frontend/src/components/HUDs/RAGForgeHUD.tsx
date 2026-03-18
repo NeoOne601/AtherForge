@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { RAGDoc } from "../../types";
+import { RAGTreePanel } from "../RAGTreePanel";
 
 interface RAGForgeHUDProps {
     docs: RAGDoc[];
@@ -11,6 +12,7 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
     const [vlmOptions, setVlmOptions] = useState<any[]>([]);
     const [selectedVlm, setSelectedVlm] = useState<string>("smolvlm-256m");
     const [isSelectingVlm, setIsSelectingVlm] = useState(false);
+    const [treeBrowserDoc, setTreeBrowserDoc] = useState<string | null>(null);
 
     useEffect(() => {
         fetch("/api/v1/ragforge/vlm-options")
@@ -115,6 +117,55 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
         }
     };
 
+    const handleRetry = async (doc: RAGDoc) => {
+        setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, status: "retrying..." } : d));
+        try {
+            const res = await fetch(`/api/v1/ragforge/documents/${doc.document_id}/retry`, {
+                method: "POST"
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setDocs(prev => prev.map(d => d.name === doc.name ? {
+                    ...d,
+                    status: data.ingest_status,
+                    tokens: `~${data.chunks_added} chunks`,
+                    chunk_count: data.chunks_added,
+                } : d));
+            } else {
+                setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, status: "failed" } : d));
+            }
+        } catch (err) {
+            console.error("Retry failed", err);
+            setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, status: "failed" } : d));
+        }
+    };
+
+    const handleEnrichImages = async (doc: RAGDoc) => {
+        setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, status: "ocr_running" } : d));
+        try {
+            const res = await fetch(`/api/v1/ragforge/documents/${doc.document_id}/enrich-images`, {
+                method: "POST"
+            });
+            const data = await res.json();
+            if (res.ok && data.status === "queued") {
+                // Show success feedback — status will update on next poll
+                setDocs(prev => prev.map(d => d.document_id === doc.document_id ? {
+                    ...d,
+                    status: "ocr_running",
+                    tokens: `${d.tokens} + ${data.image_pages} img pg(s)`,
+                } : d));
+            } else if (data.status === "no_images") {
+                setDocs(prev => prev.map(d => d.document_id === doc.document_id ? {
+                    ...d, status: "ready", image_pages_pending: 0
+                } : d));
+            }
+        } catch (err) {
+            console.error("Enrich images failed", err);
+            setDocs(prev => prev.map(d => d.document_id === doc.document_id ? { ...d, status: "partial" } : d));
+        }
+    };
+
+
     return (
         <div className="module-hud">
             <div className="hud-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -136,11 +187,16 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                         }}
                     >
                         {vlmOptions.map(o => (
-                            <option key={o.id} value={o.id}>
+                            <option key={o.id} value={o.id} title={o.hardware_message}>
                                 {o.name} {o.hardware_rating === "warning" ? "⚠️" : ""}
                             </option>
                         ))}
                     </select>
+                    {vlmOptions.find(o => o.id === selectedVlm)?.hardware_rating === "warning" && (
+                        <div style={{ color: "var(--ember)", fontSize: "10px", marginTop: "2px", maxWidth: "150px" }}>
+                            {vlmOptions.find(o => o.id === selectedVlm)?.hardware_message}
+                        </div>
+                    )}
                 </div>
             </div>
             <div style={{ display: "flex", gap: "16px" }}>
@@ -162,16 +218,101 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                                 style={{ accentColor: "var(--plasma)", cursor: "pointer" }}
                             />
                             <span className="doc-name" style={{ flex: 1, opacity: d.active ? 1 : 0.5 }}>{d.name}</span>
-                            <span className="doc-meta">
+                            <span className="doc-meta" style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                                 {d.status === "ready"
                                     ? <span style={{ color: "var(--plasma)" }}>● {d.status}</span>
-                                    : <span style={{ color: d.status === "failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>}
-                                <span>{d.tokens}</span>
+                                    : d.status === "ocr_running" || d.status === "extracting_text"
+                                    ? <span style={{ color: "var(--aether)", display: "flex", alignItems: "center", gap: "4px" }}>
+                                        <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
+                                        {d.status}
+                                      </span>
+                                    : <span style={{ color: d.status === "failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>
+                                }
+                                <span style={{ color: "var(--fg-muted)", fontSize: "11px" }}>{d.tokens}</span>
+                                {/* Image pages pending badge */}
+                                {(d.image_pages_pending || 0) > 0 && d.status !== "ocr_running" && (
+                                    <span title={`${d.image_pages_pending} page(s) contain images that need VLM enrichment`} style={{
+                                        background: "rgba(255,160,0,0.12)",
+                                        border: "1px solid rgba(255,160,0,0.4)",
+                                        borderRadius: "4px",
+                                        padding: "1px 5px",
+                                        fontSize: "10px",
+                                        color: "#ffa500",
+                                        whiteSpace: "nowrap",
+                                    }}>🖼 {d.image_pages_pending} img pg{(d.image_pages_pending || 0) > 1 ? "s" : ""} need VLM</span>
+                                )}
+                                {d.status === "ready" && (
+                                    <button
+                                        id={`tree-btn-${d.document_id}`}
+                                        onClick={() => setTreeBrowserDoc(
+                                            treeBrowserDoc === d.name ? null : d.name
+                                        )}
+                                        title="Browse document section tree"
+                                        style={{
+                                            background: treeBrowserDoc === d.name
+                                                ? "rgba(var(--plasma-rgb, 100,100,255), 0.15)"
+                                                : "transparent",
+                                            border: `1px solid ${treeBrowserDoc === d.name ? "var(--plasma)" : "var(--border)"}`,
+                                            borderRadius: "4px",
+                                            padding: "2px 6px",
+                                            fontSize: "11px",
+                                            cursor: "pointer",
+                                            color: treeBrowserDoc === d.name ? "var(--plasma)" : "var(--fg-muted)",
+                                        }}
+                                    >
+                                        🌲
+                                    </button>
+                                )}
+                                {/* Enrich Images button — shown for partial + ocr_pending docs with image pages */}
+                                {(d.status === "partial" || d.status === "ocr_pending" || d.status === "ready") && (d.image_pages_pending || 0) > 0 && (
+                                    <button
+                                        onClick={() => handleEnrichImages(d)}
+                                        title={`Trigger VLM enrichment for ${d.image_pages_pending} image page(s). Make sure Ollama is running with your selected VLM model.`}
+                                        style={{
+                                            background: "rgba(0,180,255,0.08)",
+                                            border: "1px solid rgba(0,180,255,0.4)",
+                                            color: "#00b4ff",
+                                            borderRadius: "4px",
+                                            padding: "2px 7px",
+                                            fontSize: "10px",
+                                            cursor: "pointer",
+                                            whiteSpace: "nowrap",
+                                        }}
+                                    >
+                                        🖼 Enrich Images
+                                    </button>
+                                )}
+                                {(d.status === "failed" || d.status === "ocr_pending") && (
+                                    <button 
+                                        onClick={() => handleRetry(d)}
+                                        className="repair-btn"
+                                        style={{
+                                            background: "rgba(255,100,100,0.1)",
+                                            border: "1px solid var(--ember)",
+                                            color: "var(--ember)",
+                                            borderRadius: "4px",
+                                            padding: "2px 8px",
+                                            fontSize: "10px",
+                                            cursor: "pointer",
+                                            textTransform: "uppercase",
+                                            letterSpacing: "0.5px"
+                                        }}
+                                    >
+                                        Repair
+                                    </button>
+                                )}
                             </span>
                         </div>
                     ))}
                 </div>
             </div>
+            {/* HTI Tree Browser — Phase 15 */}
+            {treeBrowserDoc && (
+                <RAGTreePanel
+                    sourceName={treeBrowserDoc}
+                    onClose={() => setTreeBrowserDoc(null)}
+                />
+            )}
         </div>
     );
 }

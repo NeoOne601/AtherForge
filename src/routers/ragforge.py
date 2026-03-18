@@ -52,6 +52,27 @@ async def update_document_selection(
     return JSONResponse(body)
 
 
+@router.post("/documents/{document_id}/retry")
+async def retry_document_ingest(document_id: str, request: Request) -> JSONResponse:
+    """Manually retry a failed or partial document ingestion."""
+    state = request.app.state.app_state
+    record = state.document_registry.get_by_id(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = state.settings.uploads_dir / record.source
+    if not file_path.exists():
+        # Fallback to LiveFolder if not in uploads
+        file_path = state.settings.data_dir / "LiveFolder" / record.source
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source file '{record.source}' not found on disk.")
+
+    logger.info("Manual retry triggered for document", source=record.source, document_id=document_id)
+    result = await state.document_intelligence.ingest_path(file_path)
+    return JSONResponse(result)
+
+
 @router.post("/upload")
 async def upload_document(request: Request, file: UploadFile = File(...)) -> JSONResponse:
     state = request.app.state.app_state
@@ -88,17 +109,18 @@ async def get_vlm_options(request: Request):
     default_vlm = getattr(state, "selected_vlm_id", "smolvlm-256m")
 
     for provider in providers:
-        hw_rating = "optimal"
         if provider.id == "apple-vlm" and not is_mac:
             continue
-        if provider.id == "ollama-qwen3.5-9b":
-            hw_rating = "warning"
+            
+        is_safe, msg = provider.is_hardware_safe()
+        hw_rating = "optimal" if is_safe else "warning"
 
         options.append(
             {
                 "id": provider.id,
                 "name": provider.name,
                 "hardware_rating": hw_rating,
+                "hardware_message": msg,
                 "tier": provider.tier,
             }
         )
@@ -117,3 +139,146 @@ async def select_vlm(payload: dict, request: Request):
     save_partial_settings({"SELECTED_VLM_ID": vlm_id})
     logger.info("VLM selection updated", vlm_id=vlm_id)
     return {"status": "ok", "vlm_id": vlm_id, "selected": vlm_id}
+
+
+@router.post("/documents/{document_id}/enrich-images")
+async def enrich_document_images(document_id: str, request: Request) -> JSONResponse:
+    """
+    Trigger VLM enrichment for only the pending image pages of a document.
+    This is the backend for the '🖼 Enrich Images' button shown for 'partial'
+    and 'ocr_pending' documents where text was extracted but images were not.
+    """
+    import fitz
+    from src.modules.ragforge_indexer import _analyze_pdf
+    from src.utils import safe_create_task
+
+    state = request.app.state.app_state
+    record = state.document_registry.get_by_id(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Resolve file path
+    file_path = state.settings.uploads_dir / record.source
+    if not file_path.exists():
+        file_path = state.settings.data_dir / "LiveFolder" / record.source
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source file '{record.source}' not found on disk.")
+
+    # Re-analyze to find which pages have images (not covered by text extraction)
+    try:
+        analysis = _analyze_pdf(file_path)
+        image_pages = analysis.get("image_pages", [])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF analysis failed: {e}")
+
+    if not image_pages:
+        return JSONResponse({
+            "status": "no_images",
+            "message": "No image pages found in this document.",
+            "document_id": document_id,
+        })
+
+    # Check VLM is reachable before queuing
+    vlm_id = str(getattr(state, "selected_vlm_id", None) or "smolvlm-256m")
+
+    # Update status to indicate VLM enrichment is pending
+    state.document_registry.update_document(
+        document_id,
+        ingest_status="ocr_running",
+        last_error=None,
+        image_pages_pending=len(image_pages),
+    )
+
+    # Queue the VLM enrichment as a background task
+    safe_create_task(
+        state.document_intelligence._run_vlm_enrichment(file_path, document_id, image_pages),
+        name=f"vlm_enrich_manual_{record.source}",
+    )
+
+    logger.info(
+        "Manual VLM enrichment queued",
+        source=record.source,
+        document_id=document_id,
+        image_pages=len(image_pages),
+        vlm_id=vlm_id,
+    )
+    return JSONResponse({
+        "status": "queued",
+        "message": f"VLM enrichment started for {len(image_pages)} image page(s) using {vlm_id}.",
+        "document_id": document_id,
+        "image_pages": len(image_pages),
+        "vlm_id": vlm_id,
+    })
+
+
+@router.post("/documents/{document_id}/force-reindex")
+async def force_reindex_document(document_id: str, request: Request) -> JSONResponse:
+    """
+    Force a full re-index of a document, bypassing the idempotency guard.
+    Use this when you've updated the file on disk and want to pick up new content.
+    """
+    state = request.app.state.app_state
+    record = state.document_registry.get_by_id(document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = state.settings.uploads_dir / record.source
+    if not file_path.exists():
+        file_path = state.settings.data_dir / "LiveFolder" / record.source
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source file '{record.source}' not found on disk.")
+
+    logger.info("Force re-index triggered", source=record.source, document_id=document_id)
+    # Update document status to signal re-index is in progress
+    state.document_registry.update_document(
+        document_id, ingest_status="extracting_text", last_error=None, chunk_count=0
+    )
+    result = await state.document_intelligence.ingest_path(file_path)
+    return JSONResponse(result)
+
+
+@router.get("/live-folder")
+async def list_live_folder(request: Request) -> JSONResponse:
+    """
+    Returns all files currently in the LiveFolder with their state.
+    Powers the WatchTower 'Live Ingestion Feed' panel showing real-time ingestion status.
+    """
+    import os
+    from pathlib import Path
+
+    state = request.app.state.app_state
+    live_folder: Path = state.settings.data_dir / "LiveFolder"
+    
+    if not live_folder.exists():
+        return JSONResponse({"files": [], "total": 0, "folder": str(live_folder)})
+
+    # Get all files in LiveFolder
+    file_entries = []
+    for fp in sorted(live_folder.iterdir()):
+        if not fp.is_file():
+            continue
+        try:
+            stat = fp.stat()
+            size_kb = round(stat.st_size / 1024, 1)
+            # Get indexed state from document registry
+            record = state.document_registry.get_by_source(fp.name)
+            entry = {
+                "name": fp.name,
+                "size_kb": size_kb,
+                "modified": stat.st_mtime,
+                "extension": fp.suffix.lower(),
+                "status": record.ingest_status if record else "not_indexed",
+                "chunk_count": record.chunk_count if record else 0,
+                "image_pages_pending": record.image_pages_pending if record else 0,
+                "document_id": record.document_id if record else None,
+                "last_error": record.last_error if record else None,
+            }
+            file_entries.append(entry)
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "files": file_entries,
+        "total": len(file_entries),
+        "folder": str(live_folder),
+    })

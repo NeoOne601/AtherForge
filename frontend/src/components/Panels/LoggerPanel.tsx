@@ -1,23 +1,74 @@
 import { useState, useEffect, useRef } from "react";
 
+// ── Persistent Logger Singleton ──────────────────────────────────────────
+// The WebSocket must NOT be closed when this component unmounts (tab switch).
+// A module-level singleton keeps the connection alive indefinitely and lets
+// multiple mounts/unmounts share the same stream without causing EPIPE.
+let _globalWs: WebSocket | null = null;
+const _logBuffer: any[] = [];
+const _logListeners: Set<(log: any) => void> = new Set();
+let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function ensureLoggerConnected() {
+    if (_globalWs && (_globalWs.readyState === WebSocket.OPEN || _globalWs.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/system/logs`);
+    _globalWs = ws;
+
+    ws.onopen = () => {
+        if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const log = JSON.parse(event.data);
+            // Keep a rolling buffer of last 500 logs for when new components mount
+            _logBuffer.push(log);
+            if (_logBuffer.length > 500) _logBuffer.shift();
+            // Notify all active listeners
+            _logListeners.forEach(fn => fn(log));
+        } catch (_) {}
+    };
+
+    ws.onclose = () => {
+        _globalWs = null;
+        // Auto-reconnect after 3 seconds regardless of cause (EPIPE, network, nav)
+        _reconnectTimer = setTimeout(ensureLoggerConnected, 3000);
+    };
+
+    ws.onerror = () => {
+        // onclose will handle reconnect
+        try { ws.close(); } catch (_) {}
+    };
+}
+
+// Start the persistent connection immediately when the module loads
+ensureLoggerConnected();
+
 export function LoggerPanel() {
-    const [logs, setLogs] = useState<any[]>([]);
+    const [logs, setLogs] = useState<any[]>([..._logBuffer]);
     const [autoScroll, setAutoScroll] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/system/logs`);
+        // Ensure connection is alive when component mounts
+        ensureLoggerConnected();
 
-        ws.onmessage = (event) => {
-            try {
-                const log = JSON.parse(event.data);
-                setLogs(prev => [...prev.slice(-199), log]);
-            } catch (err) { console.error("Logger WS error:", err); }
+        // Subscribe to new log events
+        const handler = (log: any) => {
+            setLogs(prev => [...prev.slice(-499), log]);
         };
+        _logListeners.add(handler);
 
-        return () => ws.close();
+        return () => {
+            // IMPORTANT: Do NOT close the WebSocket here.
+            // Only unsubscribe this component's listener.
+            _logListeners.delete(handler);
+        };
     }, []);
+
 
     useEffect(() => {
         if (autoScroll && scrollRef.current) {
