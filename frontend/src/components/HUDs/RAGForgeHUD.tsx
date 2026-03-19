@@ -7,12 +7,25 @@ interface RAGForgeHUDProps {
     setDocs: React.Dispatch<React.SetStateAction<RAGDoc[]>>;
 }
 
+// Per-document ingestion progress from the backend
+interface IngestionProgressEntry {
+    current_page: number;
+    total_pages: number;
+    chunks_so_far: number;
+    batch_size: number;
+    last_batch_seconds: number;
+    eta_seconds: number;
+    status: string;
+    percent: number;
+}
+
 export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [vlmOptions, setVlmOptions] = useState<any[]>([]);
     const [selectedVlm, setSelectedVlm] = useState<string>("smolvlm-256m");
     const [isSelectingVlm, setIsSelectingVlm] = useState(false);
     const [treeBrowserDoc, setTreeBrowserDoc] = useState<string | null>(null);
+    const [ingestionProgress, setIngestionProgress] = useState<Record<string, IngestionProgressEntry>>({});
 
     useEffect(() => {
         fetch("/api/v1/ragforge/vlm-options")
@@ -25,6 +38,27 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
             })
             .catch(err => console.error("Failed to fetch VLM options", err));
     }, []);
+
+    // Poll ingestion progress when any doc is in extracting_text state
+    useEffect(() => {
+        const hasActiveIngestion = docs.some(
+            d => d.status === "extracting_text" || d.status === "ocr_running" || d.status === "queued"
+        );
+        if (!hasActiveIngestion) return;
+
+        const poll = async () => {
+            try {
+                const res = await fetch("/api/v1/ragforge/ingestion-progress");
+                const data = await res.json();
+                if (data.progress) {
+                    setIngestionProgress(data.progress);
+                }
+            } catch (_) { /* silent */ }
+        };
+        poll(); // immediate first poll
+        const timer = setInterval(poll, 3000);
+        return () => clearInterval(timer);
+    }, [docs]);
 
     const handleVlmChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
         const vlm_id = e.target.value;
@@ -224,11 +258,51 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                                     : d.status === "ocr_running" || d.status === "extracting_text"
                                     ? <span style={{ color: "var(--aether)", display: "flex", alignItems: "center", gap: "4px" }}>
                                         <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
-                                        {d.status}
+                                        {(() => {
+                                            const prog = ingestionProgress[d.name];
+                                            if (prog && prog.total_pages > 0) {
+                                                return `${prog.current_page}/${prog.total_pages} pages (${prog.percent}%)`;
+                                            }
+                                            return d.status;
+                                        })()}
                                       </span>
                                     : <span style={{ color: d.status === "failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>
                                 }
                                 <span style={{ color: "var(--fg-muted)", fontSize: "11px" }}>{d.tokens}</span>
+                                {/* Real-time progress bar for active ingestion */}
+                                {(() => {
+                                    const prog = ingestionProgress[d.name];
+                                    if (!prog || prog.total_pages === 0 || prog.status === "indexing_complete") return null;
+                                    if (d.status !== "extracting_text" && d.status !== "ocr_running" && d.status !== "queued") return null;
+                                    const pct = prog.percent;
+                                    const etaMin = Math.floor(prog.eta_seconds / 60);
+                                    const etaSec = Math.round(prog.eta_seconds % 60);
+                                    return (
+                                        <div style={{ width: "100%", marginTop: "4px" }}>
+                                            <div style={{
+                                                height: "6px",
+                                                borderRadius: "3px",
+                                                background: "rgba(255,255,255,0.06)",
+                                                overflow: "hidden",
+                                            }}>
+                                                <div style={{
+                                                    height: "100%",
+                                                    width: `${pct}%`,
+                                                    borderRadius: "3px",
+                                                    background: "linear-gradient(90deg, var(--plasma), var(--aether))",
+                                                    transition: "width 0.8s ease",
+                                                }} />
+                                            </div>
+                                            <div style={{
+                                                display: "flex", justifyContent: "space-between",
+                                                fontSize: "10px", color: "var(--fg-muted)", marginTop: "2px",
+                                            }}>
+                                                <span>{prog.chunks_so_far} chunks · batch {prog.last_batch_seconds.toFixed(1)}s</span>
+                                                <span>ETA {etaMin > 0 ? `${etaMin}m ` : ""}{etaSec}s</span>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
                                 {/* Image pages pending badge */}
                                 {(d.image_pages_pending || 0) > 0 && d.status !== "ocr_running" && (
                                     <span title={`${d.image_pages_pending} page(s) contain images that need VLM enrichment`} style={{

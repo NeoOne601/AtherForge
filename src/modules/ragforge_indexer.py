@@ -67,6 +67,17 @@ MAX_EQUATION_CHARS = 800  # one equation block
 FALLBACK_CHUNK_SIZE = 1000  # plain text fallback
 FALLBACK_OVERLAP = 100  # overlap between chunks
 
+# ── Ingestion Progress Tracker ────────────────────────────────────
+# In-memory dict: filename → {current_page, total_pages, chunks_so_far, status, batch_time_avg}
+# Read by the /api/v1/ragforge/ingestion-progress endpoint for real-time UI updates.
+_ingestion_progress: dict[str, dict] = {}
+
+# ── Docling Converter Singleton ───────────────────────────────────
+# Docling's DocumentConverter initializes layout models, tableformer, and OCR engines.
+# This takes 3-5 seconds. Re-creating it per batch is the #1 performance killer.
+# We cache a single instance keyed by pipeline options hash.
+_docling_converter_cache: dict[str, Any] = {}  # options_hash → DocumentConverter
+
 
 # ─────────────────────────────────────────────────────────────────
 # Phase 1: Smart Loading
@@ -133,7 +144,11 @@ def _analyze_pdf(filepath: Path) -> dict:
         gc.collect()  # Ensure fitz handle is released quickly
 
 
-def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Document]], None]] = None) -> list[Document]:
+def load_with_docling(
+    filepath: Path,
+    chunk_callback: Optional[Callable[[list[Document]], None]] = None,
+    adaptive_batch_size: int = 10,
+) -> list[Document]:
     """
     Use IBM Docling to extract structured content from a digital PDF.
     Supports a chunk_callback for progressive indexing of large documents.
@@ -144,6 +159,8 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
       - page: page number (0-indexed)
       - doc_type: 'text' | 'table' | 'formula' | 'picture'
     """
+    import time as _time
+
     try:
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions
@@ -158,6 +175,9 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
         pipeline_options.do_table_structure = True
         pipeline_options.images_scale = 1.0
         pipeline_options.generate_page_images = False
+        # Fix: Enable picture image generation so Docling exports real image
+        # data instead of the '🖼️❌ Image not available' placeholder.
+        pipeline_options.generate_picture_images = True
         
         # Disable expensive vision enrichments to save RAM
         if hasattr(pipeline_options, "enrichment"):
@@ -166,8 +186,8 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
         
         # Limit concurrency to prevent iMac freezing
         pipeline_options.accelerator_options = AcceleratorOptions(
-            num_threads=1,
-            device="mps" # Keep MPS for speed, but limit threads
+            num_threads=2,  # Increased from 1 → 2 for better MPS utilization
+            device="mps"    # Keep MPS for speed
         )
 
         # ── XY-Cut++ Pre-Pass: build per-page layout map ─────────────
@@ -193,25 +213,59 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
             pdf_doc.close()
             page_layout_map = {}
         
-        converter = DocumentConverter(
-            format_options={
-                "pdf": PdfFormatOption(pipeline_options=pipeline_options)
-            }
-        )
+        # ── Converter Singleton ───────────────────────────────────────
+        # Docling's DocumentConverter loads layout models + tableformer + OCR
+        # engines on __init__ (~3-5s). Re-creating it per batch was the #1
+        # performance killer (observed 37 × 3s = 111s wasted on HA-13).
+        import hashlib
+        opts_hash = hashlib.md5(
+            f"{pipeline_options.do_ocr}{pipeline_options.do_table_structure}"
+            f"{pipeline_options.images_scale}{pipeline_options.generate_picture_images}"
+            f"{pipeline_options.accelerator_options.num_threads}"
+            f"{pipeline_options.accelerator_options.device}"
+            .encode()
+        ).hexdigest()[:12]
+
+        if opts_hash in _docling_converter_cache:
+            converter = _docling_converter_cache[opts_hash]
+            logger.info("Reusing cached Docling converter (hash=%s)", opts_hash)
+        else:
+            converter = DocumentConverter(
+                format_options={
+                    "pdf": PdfFormatOption(pipeline_options=pipeline_options)
+                }
+            )
+            _docling_converter_cache[opts_hash] = converter
+            logger.info("Created new Docling converter (hash=%s) — cached for reuse", opts_hash)
+
         all_chunks: list[Document] = []
         current_section = "Introduction"
         # HTI: Hierarchical Tree Index state
         section_path: list[str] = ["Root"]
         section_ids: list[str] = [str(uuid.uuid4())]
-        batch_size = 10  # Reduced batch size for 8GB RAM stability
+        batch_size = adaptive_batch_size
         
+        # ── Initialize progress tracker ───────────────────────────────
+        _ingestion_progress[filepath.name] = {
+            "current_page": 0,
+            "total_pages": total_pages,
+            "chunks_so_far": 0,
+            "status": "extracting_text",
+            "batch_times": [],
+            "batch_size": batch_size,
+        }
+
         for start_page in range(1, total_pages + 1, batch_size):
             end_page = min(start_page + batch_size - 1, total_pages)
             logger.info("Throttled Batch: pages %d to %d of %d", start_page, end_page, total_pages)
             
+            batch_start_time = _time.monotonic()
+
             # Use Docling's page_range (1-indexed)
             result = converter.convert(str(filepath), page_range=(start_page, end_page))
             doc = result.document
+            
+            batch_elapsed = _time.monotonic() - batch_start_time
             
             batch_chunks: list[Document] = []
             for item, _level in doc.iterate_items():
@@ -327,6 +381,26 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
                 
             all_chunks.extend(batch_chunks)
             
+            # ── Update progress tracker ──────────────────────────────
+            progress = _ingestion_progress.get(filepath.name)
+            if progress:
+                progress["current_page"] = end_page
+                progress["chunks_so_far"] = len(all_chunks)
+                progress["batch_times"].append(round(batch_elapsed, 2))
+                # Running average for ETA calculation
+                avg_time = sum(progress["batch_times"]) / len(progress["batch_times"])
+                remaining_batches = max(0, (total_pages - end_page) / batch_size)
+                progress["eta_seconds"] = round(avg_time * remaining_batches, 1)
+                progress["last_batch_seconds"] = round(batch_elapsed, 2)
+                logger.info(
+                    "Progress: %d/%d pages (%.0f%%) | %d chunks | batch %.1fs | ETA %.0fs",
+                    end_page, total_pages,
+                    100 * end_page / max(total_pages, 1),
+                    len(all_chunks),
+                    batch_elapsed,
+                    progress["eta_seconds"],
+                )
+
             # ── Explicitly unload backend to release OCR memory ──
             try:
                 # Docling legacy check
@@ -339,6 +413,14 @@ def load_with_docling(filepath: Path, chunk_callback: Optional[Callable[[list[Do
             del result
             del doc
             gc.collect()
+
+        # ── Mark progress complete ────────────────────────────────
+        progress = _ingestion_progress.get(filepath.name)
+        if progress:
+            progress["status"] = "indexing_complete"
+            progress["current_page"] = total_pages
+            progress["chunks_so_far"] = len(all_chunks)
+            progress["eta_seconds"] = 0
 
         logger.info("Docling (Throttled) completed: %d total chunks for '%s'", len(all_chunks), filepath.name)
 
@@ -788,7 +870,17 @@ def load_document(
                 analysis = {"has_images": False, "image_pages": [], "is_scanned": False}
 
             # Digital PDF or Excel — Docling/PyPDF handles all text extraction
-            chunks = load_with_docling(filepath, chunk_callback=chunk_callback)
+            # ── Adaptive batch sizing (Fix 5) ──────────────────────────
+            # Scanned PDFs: pure OCR, MPS amortizes well → 25 pages/batch
+            # Mixed (text + images): balance init vs RAM → 15 pages/batch
+            # Table-heavy or Excel: TableFormer spikes RAM → 10 pages/batch
+            if analysis.get("is_scanned"):
+                adaptive_batch = 25
+            elif analysis.get("has_images"):
+                adaptive_batch = 15
+            else:
+                adaptive_batch = 10
+            chunks = load_with_docling(filepath, chunk_callback=chunk_callback, adaptive_batch_size=adaptive_batch)
 
             # --- Scanned PDF OCR Fallback ---
             # If Docling produces 0 chunks on a fully scanned PDF, use offline OCR.

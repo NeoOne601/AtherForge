@@ -282,3 +282,37 @@ async def list_live_folder(request: Request) -> JSONResponse:
         "total": len(file_entries),
         "folder": str(live_folder),
     })
+
+
+@router.get("/ingestion-progress")
+async def get_ingestion_progress() -> JSONResponse:
+    """Real-time ingestion progress for all currently processing documents.
+
+    Returns per-document metrics:
+      - current_page / total_pages — how far Docling has processed
+      - chunks_so_far — chunks extracted so far
+      - batch_size — adaptive batch size being used
+      - last_batch_seconds — how long the most recent batch took
+      - eta_seconds — estimated time remaining based on running average
+      - status — 'extracting_text' or 'indexing_complete'
+    """
+    from src.modules.ragforge_indexer import _ingestion_progress
+
+    # Strip batch_times list (internal metric, too verbose for API)
+    progress_data = {}
+    for filename, info in _ingestion_progress.items():
+        progress_data[filename] = {
+            "current_page": info.get("current_page", 0),
+            "total_pages": info.get("total_pages", 0),
+            "chunks_so_far": info.get("chunks_so_far", 0),
+            "batch_size": info.get("batch_size", 10),
+            "last_batch_seconds": info.get("last_batch_seconds", 0),
+            "eta_seconds": info.get("eta_seconds", 0),
+            "status": info.get("status", "unknown"),
+            "percent": round(
+                100 * info.get("current_page", 0) / max(info.get("total_pages", 1), 1),
+                1,
+            ),
+        }
+
+    return JSONResponse({"progress": progress_data})
