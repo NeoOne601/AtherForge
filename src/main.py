@@ -1,8 +1,30 @@
 # AetherForge v1.0 — src/main.py
 from __future__ import annotations
 
+# ── Startup noise suppression ─────────────────────────────────────────────────
+# These warnings are known, harmless, and produce zero actionable signal:
+#  1. transformers >=4.46 renamed torch_dtype → dtype in from_pretrained().
+#     Our providers now use dtype= but Docling's internal pipeline still uses
+#     torch_dtype when loading Florence-2 via docling_ibm/docling_tableformer.
+#     This is a Docling upstream issue — suppressed until Docling is updated.
+#  2. sentence-transformers emits a DeprecationWarning for modelcard_path.
+#     Completely harmless, fixed in sentence-transformers >=3.x.
+import warnings as _w
+_w.filterwarnings(
+    "ignore",
+    message=".*torch_dtype.*",
+    category=FutureWarning,
+)
+_w.filterwarnings(
+    "ignore",
+    message=".*modelcard_path.*",
+    category=DeprecationWarning,
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import os as _os
 from typing import Any
+
 
 import typer
 import uvicorn

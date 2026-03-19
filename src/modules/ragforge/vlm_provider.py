@@ -73,6 +73,14 @@ class VLMProvider(ABC):
         """Process an image and return extracted text/analysis."""
         pass
 
+    def is_hardware_safe(self) -> tuple[bool, str]:
+        """Returns (is_safe, warning_message)."""
+        import psutil
+        total_gb = psutil.virtual_memory().total / (1024**3)
+        if total_gb < 10 and self.required_ram_gb > 3:
+            return False, f"⚠️ Low RAM ({total_gb:.1f}GB): {self.name} may freeze your system."
+        return True, ""
+
 
 class SmolVLMProvider(VLMProvider):
     """
@@ -122,7 +130,9 @@ class SmolVLMProvider(VLMProvider):
             self.processor = AutoProcessor.from_pretrained(repo_id)
             self.model = AutoModelForVision2Seq.from_pretrained(
                 repo_id,
-                torch_dtype=torch.bfloat16,
+                # transformers >=4.46 renamed torch_dtype -> dtype
+                # Using dtype avoids the FutureWarning at startup
+                dtype=torch.bfloat16,
                 _attn_implementation="eager",  # Flash attention often fails on MPS
             ).to(self.device)
 
@@ -225,6 +235,21 @@ class FlorenceProvider(VLMProvider):
         repo_id = "microsoft/Florence-2-base"
 
         def _load():
+            # Florence-2 uses trust_remote_code=True which runs its own
+            # require_version() checker for einops and timm. These packages
+            # ARE installed (einops>=0.8, timm>=1.0) but the remote code
+            # checker can occasionally report a false "not found" warning.
+            # Pre-importing them here ensures they're in sys.modules before
+            # Florence-2's model code executes, silencing the false alarm.
+            try:
+                import einops  # noqa: F401 — pre-load to prevent Florence-2 false alarm
+                import timm    # noqa: F401 — pre-load to prevent Florence-2 false alarm
+            except ImportError:
+                logger.warning(
+                    "Florence-2 optional deps missing (einops/timm). "
+                    "VLM enrichment may be degraded. Run: pip install einops timm"
+                )
+
             self.processor = AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
                 repo_id,
@@ -528,8 +553,7 @@ def get_vlm_provider(provider_id: str) -> Optional["VLMProvider"]:
     """Factory to get a VLM provider instance by its ID.
 
     Uses a lazy singleton registry — each provider class is instantiated
-    exactly once and reused on subsequent calls, preventing repeated
-    torch library initialization overhead.
+    exactly once and re-used on subsequent calls.
     """
     global _PROVIDER_REGISTRY
     if provider_id in _PROVIDER_REGISTRY:
@@ -538,6 +562,11 @@ def get_vlm_provider(provider_id: str) -> Optional["VLMProvider"]:
     for provider_cls in AVAILABLE_PROVIDERS:
         instance = provider_cls()
         if instance.id == provider_id:
+            # Check hardware safety before registering
+            is_safe, msg = instance.is_hardware_safe()
+            if not is_safe:
+                logger.warning("VLM Safety Warning: %s", msg)
+                # We still return it, but the UI should use this info
             _PROVIDER_REGISTRY[provider_id] = instance
             return instance
     return None
