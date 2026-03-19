@@ -173,11 +173,13 @@ class SparseIndex:
             """
             params = [safe_query]
 
-            if source_filter:
+            if source_filter is not None:
                 if isinstance(source_filter, str):
                     sql += " AND c.source = ?"
                     params.append(source_filter)
                 elif isinstance(source_filter, list):
+                    if not source_filter:
+                        return []
                     placeholders = ",".join(["?"] * len(source_filter))
                     sql += f" AND c.source IN ({placeholders})"
                     params.extend(source_filter)
@@ -347,13 +349,17 @@ def hybrid_search(
 
     # ── Dense retrieval (ChromaDB) ────────────────────────────────
     filter_kwargs = {}
-    if source_filter:
+    if source_filter is not None:
         if isinstance(source_filter, str):
             filter_kwargs["filter"] = {"source": source_filter}
-        elif isinstance(source_filter, list) and len(source_filter) == 1:
-            filter_kwargs["filter"] = {"source": source_filter[0]}
         elif isinstance(source_filter, list):
-            filter_kwargs["filter"] = {"source": {"$in": source_filter}} # type: ignore
+            if not source_filter:
+                logger.info("Empty source_filter provided, returning empty results.")
+                return []
+            if len(source_filter) == 1:
+                filter_kwargs["filter"] = {"source": source_filter[0]}
+            else:
+                filter_kwargs["filter"] = {"source": {"$in": source_filter}} # type: ignore
 
     try:
         dense_results: list[Document] = vector_store.similarity_search(query, k=k * 2, **filter_kwargs)

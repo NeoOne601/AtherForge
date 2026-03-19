@@ -11,7 +11,8 @@
 #   ④ Evidence Scoring        — rank chunks by sub-question relevance
 #   ⑤ Chain-of-Thought        — step-by-step reasoning through evidence
 #   ⑥ Self-Verification       — check answer against evidence
-#   ⑦ Iterative Re-retrieval  — refine if self-verification fails
+#   ⑦ Structural Enrichment  — leverage HTI to fetch siblings/parents
+#   ⑧ Iterative Re-retrieval  — refine if self-verification fails
 #
 # Key constraint: runs on 8GB edge devices. All stages reuse the
 # already-loaded BitNet model (~950 extra tokens per query, ~0.5s).
@@ -163,9 +164,15 @@ class CognitiveRAG:
 
         # ── Stage 4: Evidence Scoring ────────────────────────────
         scored_docs = self._score_evidence(query, all_docs)
-        top_docs: list[Document] = scored_docs[:5]  # type: ignore
+        
+        # ── Stage 4.5: Structural Enhancement (HTI Pattern) ───
+        # Use HTI metadata to "expand" context from the top hits
+        if scored_docs:
+            scored_docs = self._structural_enrichment(scored_docs[:2], scored_docs)
+            
+        top_docs: list[Document] = scored_docs[:6]  # type: ignore
         trace.evidence_chunks = len(top_docs)
-        logger.info("CognitiveRAG ④ Top %d evidence chunks scored", len(top_docs))
+        logger.info("CognitiveRAG ④.5 Structural enhancement completed (Top %d chunks)", len(top_docs))
 
         # ── Stage 5: Chain-of-Thought Synthesis ──────────────────
         answer, reasoning = self._chain_of_thought(query, top_docs, trace, prompt_variant)
@@ -208,9 +215,123 @@ class CognitiveRAG:
 
         return answer, top_docs, trace
 
-    # ─────────────────────────────────────────────────────────────
-    # STAGE 1: Query Understanding
-    # ─────────────────────────────────────────────────────────────
+    async def think_and_answer_stream(
+        self,
+        query: str,
+        source_filter: str | list[str] | None = None,
+        prompt_variant: str = "v1",
+    ):
+        """
+        Async generator: yields RAG answer tokens with live citation metadata.
+
+        Yields dict:
+            {"type": "reasoning", "content": str}     — thinking trace tokens
+            {"type": "token", "content": str, "citation_id": str | None}
+            {"type": "citation", "id": str, "source": str, "page": int, "excerpt": str}
+            {"type": "done", "trace": dict}
+        """
+        import asyncio
+
+        t0 = time.perf_counter()
+        trace = ThinkingTrace()
+
+        # Stage 1: Query Understanding
+        trace.query_type = self._classify_query(query)
+        yield {"type": "reasoning", "content": f"[Query type: {trace.query_type}]\n"}
+
+        # Stage 2: Decompose / HyDE
+        search_queries: list[str] = []
+        if trace.query_type in ("COMPARATIVE", "SYNTHESIS"):
+            sub_qs = self._decompose_query(query)
+            trace.sub_questions = sub_qs
+            search_queries = sub_qs
+            yield {"type": "reasoning", "content": f"[Decomposed into {len(sub_qs)} sub-questions]\n"}
+        elif trace.query_type == "VAGUE":
+            hypothesis = self._hyde_generate(query)
+            trace.hyde_hypothesis = hypothesis
+            search_queries = [hypothesis, query]
+            yield {"type": "reasoning", "content": "[Generating HyDE hypothesis...]\n"}
+        else:
+            search_queries = [query]
+
+        # Stage 3: Search
+        all_docs = self._multi_path_search(search_queries, source_filter)
+        yield {"type": "reasoning", "content": f"[Retrieved {len(all_docs)} chunks]\n"}
+
+        if not all_docs:
+            yield {"type": "token", "content": "No relevant documents found. Please upload documents first.", "citation_id": None}
+            yield {"type": "done", "trace": {"query_type": trace.query_type, "evidence": 0}}
+            return
+
+        # Stage 4: Evidence Scoring + Structural Enrichment
+        scored_docs = self._score_evidence(query, all_docs)
+        if scored_docs:
+            scored_docs = self._structural_enrichment(scored_docs[:2], scored_docs)
+        top_docs: list[Document] = scored_docs[:6]  # type: ignore
+        trace.evidence_chunks = len(top_docs)
+
+        # Emit citation registry BEFORE streaming tokens
+        citation_map: dict[str, Document] = {}
+        for i, doc in enumerate(top_docs):
+            cid = f"[{i + 1}]"
+            citation_map[cid] = doc
+            yield {
+                "type": "citation",
+                "id": cid,
+                "source": doc.metadata.get("source", "unknown"),
+                "page": doc.metadata.get("page", 0),
+                "section": doc.metadata.get("section", ""),
+                "excerpt": doc.page_content[:200],
+            }
+
+        # Stage 5: Synthesise answer (synchronous LLM call; run in thread)
+        yield {"type": "reasoning", "content": "[Synthesising answer...]\n"}
+        answer, reasoning = await asyncio.to_thread(
+            self._chain_of_thought, query, top_docs, trace, prompt_variant
+        )
+        trace.reasoning_chain = reasoning
+
+        # Stream answer word-by-word with citation attribution
+        # Simple heuristic: attribute each sentence to its best-matching citation
+        sentences = re.split(r"(?<=[.!?])\s+", answer.strip())
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+            # Find best citation for this sentence
+            best_cid: str | None = None
+            best_overlap = 0
+            for cid, doc in citation_map.items():
+                # Count word overlap
+                s_words = set(sentence.lower().split())
+                d_words = set(doc.page_content.lower().split())
+                overlap = len(s_words & d_words)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_cid = cid
+
+            # Yield sentence tokens
+            words = sentence.split()
+            for j, word in enumerate(words):
+                yield {
+                    "type": "token",
+                    "content": word + (" " if j < len(words) - 1 else " "),
+                    "citation_id": best_cid if j == len(words) - 1 else None,
+                }
+            await asyncio.sleep(0)  # Yield control between sentences
+
+        # Done signal
+        trace.latency_ms = (time.perf_counter() - t0) * 1000
+        yield {
+            "type": "done",
+            "trace": {
+                "query_type": trace.query_type,
+                "evidence": trace.evidence_chunks,
+                "latency_ms": round(trace.latency_ms, 1),
+                "verified": trace.verification_passed,
+            },
+        }
+
+
 
     def _classify_query(self, query: str) -> QueryType:
         """
@@ -404,6 +525,54 @@ class CognitiveRAG:
         except Exception:
             # If parsing fails, return original order
             return docs
+
+    # ─────────────────────────────────────────────────────────────
+    # STAGE 4.5: Structural Enrichment (HTI)
+    # ─────────────────────────────────────────────────────────────
+
+    def _structural_enrichment(
+        self, seed_docs: list[Document], all_docs: list[Document]
+    ) -> list[Document]:
+        """
+        Use HTI metadata (parent_id, path) to fetch logically related chunks
+        not caught by the initial vector/BM25 search.
+        """
+        if not seed_docs:
+            return all_docs
+
+        related_ids = set()
+        for doc in seed_docs:
+            parent_id = doc.metadata.get("parent_id")
+            if parent_id:
+                related_ids.add(parent_id)
+
+        if not related_ids:
+            return all_docs
+
+        # We attempt a secondary "Structural" fetch via the search_fn
+        # by using the parent_id as a query or filter if supported.
+        # For this prototype, we'll try searching for the 'path' which is unique.
+        expanded_docs = []
+        seen_ids = {str(d.metadata.get("chunk_id", d.page_content[:80])) for d in all_docs}
+
+        for pid in related_ids:
+            try:
+                # Search for chunks belonging to the same logical tree branch
+                struct_results = self.search(query=f"parent_id:{pid}", k=3)
+                for s_doc in struct_results or []:
+                    s_id = str(s_doc.metadata.get("chunk_id", s_doc.page_content[:80]))
+                    if s_id not in seen_ids:
+                        seen_ids.add(s_id)
+                        expanded_docs.append(s_doc)
+            except Exception as e:
+                logger.debug("Structural expansion failed for ID %s: %s", pid, e)
+
+        if expanded_docs:
+            logger.info("HTI: Expanded context with %d logically related chunks", len(expanded_docs))
+            # Insert expansion results right after seed docs to maintain relevance
+            return seed_docs + expanded_docs + all_docs[len(seed_docs) :]
+
+        return all_docs
 
     _RAG_PROMPT_VARIANTS = {
         "v1": (

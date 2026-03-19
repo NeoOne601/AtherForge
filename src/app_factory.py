@@ -40,6 +40,8 @@ from src.routers import (
     guardrails_router,
     learning_router,
     ragforge_router,
+    ragforge_stream_router,
+    ragforge_tree_router,
     sessions_router,
     settings_router,
     streamsync_router,
@@ -181,6 +183,8 @@ def create_app() -> FastAPI:
     # Register Routers
     app.include_router(chat_router)
     app.include_router(ragforge_router)
+    app.include_router(ragforge_stream_router)
+    app.include_router(ragforge_tree_router)
     app.include_router(streamsync_router)
     app.include_router(watchtower_router)
     app.include_router(sessions_router)

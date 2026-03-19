@@ -209,6 +209,13 @@ class DocumentRegistry:
         row = self._get_conn().execute("SELECT COUNT(*) AS total FROM documents").fetchone()
         return int(row["total"]) if row else 0
 
+    def get_selected_sources(self) -> list[str]:
+        """Return names of all documents marked as selected."""
+        rows = self._get_conn().execute(
+            "SELECT source FROM documents WHERE selected = 1"
+        ).fetchall()
+        return [str(row["source"]) for row in rows]
+
     def _row_to_record(self, row: sqlite3.Row) -> DocumentRecord:
         return DocumentRecord(
             document_id=str(row["document_id"]),

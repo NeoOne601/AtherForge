@@ -212,7 +212,7 @@ export default function App() {
                                 disabled={isChangingChatModel}
                                 className="chat-brain-select"
                             >
-                                {isChangingChatModel && <option value={selectedChatModel}>Downloading... (this will take a minute)</option>}
+                                {isChangingChatModel && <option value={selectedChatModel}>Loading Model... (this may take 10-15s)</option>}
                                 {!isChangingChatModel && chatModels.map(m => (
                                     <option key={m.id} value={m.id}>{m.name}</option>
                                 ))}

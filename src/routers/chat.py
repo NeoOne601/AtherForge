@@ -83,6 +83,9 @@ async def chat(
         # ── Session bootstrap ─────────────────────────────────
         _bootstrap_session(state, internal_sid, request.module, is_new)
 
+        if request.module in ("ragforge", "analytics") and not request.context.get("active_docs"):
+            request.context["active_docs"] = state.document_registry.get_selected_sources()
+
         result = await execute_turn(
             state,
             session_id=internal_sid,
@@ -161,6 +164,9 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
             xray_mode = bool(data.get("xray_mode", False))
             context: dict[str, Any] = data.get("context", {}) or {}
             client_session_id = str(data.get("session_id") or session_id)
+
+            if module in ("ragforge", "analytics") and not context.get("active_docs"):
+                context["active_docs"] = state.document_registry.get_selected_sources()
 
             if not message:
                 continue

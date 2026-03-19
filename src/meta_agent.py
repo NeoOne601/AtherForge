@@ -236,9 +236,10 @@ class StreamSanitizer:
             self.content_buffer += chunk
 
             # 2. Check for tool shielding (JSON blocks)
+            # CRITICAL: We only shield JSON if we are NOT in thinking mode.
+            # DeepSeek/Llama models often output JSON plans inside <think> tags.
+            # We want those to be visible as reasoning, not shielded as tools.
             if not self.is_thinking:
-                # We only check for JSON if we aren't currently inside a think block.
-                # LLMs occasionally output tools after </think>.
                 json_indicator = re.search(r"(?:```(?:json)?\s*)?\{\s*\"(?:name|tool_name|action)\"", self.content_buffer, re.IGNORECASE)
                 if json_indicator:
                     # Yield everything before the JSON start as normal tokens
@@ -251,20 +252,20 @@ class StreamSanitizer:
                     self.json_buffer += self.content_buffer[json_indicator.start():] # type: ignore
                     self.content_buffer = ""
                     
-                    # Check if the JSON block is already complete in this chunk
+                if self.shield_active:
+                    # Check if the JSON block is already complete in the buffer
+                    # (LLM might have output it all at once or in a fast stream)
                     if "```" in self.json_buffer and self.json_buffer.count("```") >= 2:
                         self.shield_active = False
                         self._try_parse_tool()
-                
-                if self.shield_active:
-                    # Continue buffering JSON and dont yield tokens
-                    self.json_buffer += chunk # The chunk was already added to content_buffer... wait.
-                    # Actually, we should just use the chunks collected.
-                    if len(self.json_buffer) > 2000: # Safety valve
-                        self.shield_active = False
-                        self._try_parse_tool()
-                        self.json_buffer = ""
-                    continue
+                        # Any leftover text in content_buffer will be handled by the thinking check below
+                    else:
+                        # Continue buffering JSON and dont yield tokens
+                        if len(self.json_buffer) > 2000: # Safety valve
+                            self.shield_active = False
+                            self._try_parse_tool()
+                            self.json_buffer = ""
+                        continue
 
             # 3. Handle Thinking Tags
             while True:
@@ -1293,8 +1294,11 @@ class MetaAgent:
         citations.extend(tool_citations)
         attachments[:] = merge_attachment_names(attachments, tool_attachments) # type: ignore
 
+        # Strip tool definitions for the synthesis prompt to prevent infinite loops
+        clean_context = re.sub(r"\n\nAVAILABLE TOOLS:.*", "", module_context, flags=re.DOTALL)
+
         summary_messages = [
-            SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + module_context),
+            SystemMessage(content=_SYSTEM_PROMPT + "\n\n" + clean_context),
             HumanMessage(content=inp.message),
             SystemMessage(
                 content=(
@@ -1408,8 +1412,31 @@ class MetaAgent:
 
         tools_list = tool_registry.get_tool_definitions()
 
-        # Inject Web Search & Weather tools if enabled (Legacy injection for backward compatibility with prompt)
-        # Note: These are now properly registered in CoreModule as well.
+        # Dynamic context filtering: Prevent tool cross-contamination between modules
+        allowed_tools = set()
+
+        if bool(inp.context.get("deep_research", False)):
+            allowed_tools.update({"get_research_status", "write_vfs_note", "write_todos", "clear_planner"})
+            
+        if bool(inp.context.get("web_search_enabled", False)):
+            allowed_tools.update({"search_web", "get_weather", "get_joke"})
+            
+        module_specific_tools = {
+            "watchtower": {"query_metrics", "get_top_processes", "kill_process"},
+            "streamsync": {"query_stream", "summarize_stream", "clear_buffer"},
+            "tunelab": {"query_buffer_stats", "trigger_compilation"},
+            "analytics": {"analyze_data", "create_visual"},
+            "ragforge": set(),
+            "localbuddy": set()
+        }
+        
+        allowed_tools.update(module_specific_tools.get(main_module, set()))
+        
+        # In ragforge, analytics tools are inherently linked if analytics is enabled
+        if requested_module == "ragforge" and bool(inp.context.get("analytics_enabled", False)):
+             allowed_tools.update(module_specific_tools["analytics"])
+
+        tools_list = [t for t in tools_list if t["name"] in allowed_tools]
 
         # Pre-process module context with tools
         if tools_list:
@@ -1547,6 +1574,9 @@ class MetaAgent:
                     tool_args = tool_call.get("arguments", {})
 
                     logger.info("Executing tool in loop", name=tool_name, iteration=iteration + 1)
+                    # We can't easily yield from here because _run_sync is synchronous.
+                    # This is why the user sees a "queue" - the backend is busy in this loop.
+                    # For now, we rely on the terminal logs being visible, but in stream() we fix this.
                     tool_result = tool_registry.execute_tool(tool_name, tool_args, state=planning_state)
                     clean_ai_msg = (
                         f"<think>\n{reasoning}\n</think>\n```json\n{json.dumps(tool_call, indent=2)}\n```"
@@ -2188,6 +2218,7 @@ class MetaAgent:
                     draft_content = []
                     async for tok in self._stream_llm_pass(s_prompt_str):
                          draft_content.append(tok)
+                         yield {"type": "token", "content": tok}
                     draft_text = "".join(draft_content)
                     
                     # Stage 2 & 3: Grounding Audit & Citation enforcement

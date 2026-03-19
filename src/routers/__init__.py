@@ -3,6 +3,8 @@ from .export import router as export_router
 from .guardrails import router as guardrails_router
 from .learning import router as learning_router
 from .ragforge import router as ragforge_router
+from .ragforge_stream import router as ragforge_stream_router
+from .ragforge_tree import router as ragforge_tree_router
 from .sessions import router as sessions_router
 from .settings import router as settings_router
 from .streamsync import router as streamsync_router

@@ -86,6 +86,9 @@ async def async_vlm_enrich(
                             },
                         )
                     )
+                elif "Ollama Error" in str(analysis):
+                    logger.error("VLM provider is unreachable. Aborting VLM enrichment for remaining pages.")
+                    break
             except Exception as e:
                 logger.warning("VLM failed on page %d: %s", page_num + 1, e)
             finally:
