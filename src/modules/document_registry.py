@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS documents (
     chunk_count         INTEGER NOT NULL DEFAULT 0,
     image_pages_pending INTEGER NOT NULL DEFAULT 0,
     last_error          TEXT,
+    last_indexed_mtime  REAL NOT NULL DEFAULT 0.0,
     selected            INTEGER NOT NULL DEFAULT 1,
     created_at          REAL NOT NULL,
     updated_at          REAL NOT NULL
@@ -40,6 +41,7 @@ class DocumentRecord:
     chunk_count: int
     image_pages_pending: int
     last_error: str | None
+    last_indexed_mtime: float
     selected: bool
     created_at: float
     updated_at: float
@@ -81,6 +83,7 @@ class DocumentRegistry:
         chunk_count: int = 0,
         image_pages_pending: int = 0,
         last_error: str | None = None,
+        last_indexed_mtime: float | None = None,
         selected: bool | None = None,
     ) -> DocumentRecord:
         now = time.time()
@@ -98,7 +101,8 @@ class DocumentRegistry:
                     """
                     UPDATE documents
                     SET file_type = ?, ingest_status = ?, parser = ?, chunk_count = ?,
-                        image_pages_pending = ?, last_error = ?, selected = ?, updated_at = ?
+                        image_pages_pending = ?, last_error = ?, last_indexed_mtime = ?,
+                        selected = ?, updated_at = ?
                     WHERE source = ?
                     """,
                     (
@@ -108,6 +112,7 @@ class DocumentRegistry:
                         int(chunk_count),
                         int(image_pages_pending),
                         last_error,
+                        last_indexed_mtime if last_indexed_mtime is not None else float(existing.get("last_indexed_mtime", 0.0)),
                         selected_value if selected is None else (1 if selected else 0),
                         now,
                         source,
@@ -120,8 +125,8 @@ class DocumentRegistry:
                     """
                     INSERT INTO documents (
                         document_id, source, file_type, ingest_status, parser, chunk_count,
-                        image_pages_pending, last_error, selected, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        image_pages_pending, last_error, last_indexed_mtime, selected, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         document_id,
@@ -132,6 +137,7 @@ class DocumentRegistry:
                         int(chunk_count),
                         int(image_pages_pending),
                         last_error,
+                        last_indexed_mtime or 0.0,
                         1 if selected is not False else 0,
                         created_at,
                         now,
@@ -153,6 +159,7 @@ class DocumentRegistry:
             "chunk_count",
             "image_pages_pending",
             "last_error",
+            "last_indexed_mtime",
             "selected",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
@@ -226,6 +233,7 @@ class DocumentRegistry:
             chunk_count=int(row["chunk_count"] or 0),
             image_pages_pending=int(row["image_pages_pending"] or 0),
             last_error=str(row["last_error"]) if row["last_error"] else None,
+            last_indexed_mtime=float(row["last_indexed_mtime"] or 0.0),
             selected=bool(row["selected"]),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),

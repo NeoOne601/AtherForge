@@ -93,6 +93,7 @@ class DocumentIntelligenceService:
             parser=parser,
             chunk_count=chunks_added,
             image_pages_pending=image_pages_pending,
+            last_indexed_mtime=result.get("last_indexed_mtime"),
             last_error=last_error,
         )
         assert updated is not None

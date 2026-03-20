@@ -33,9 +33,9 @@ logger = structlog.get_logger("aetherforge.ragforge_indexer")
 
 # ── Memory Governor ──────────────────────────────────────────────
 # Hard cap: never start an IN-PROCESS VLM if system memory exceeds this.
-# On 8GB macOS: baseline OS uses ~50% (4GB). At 80% ceiling = 6.4GB.
-# This 5% reduction prevents the OS from hitting the "Compressed Memory Wall".
-MEMORY_CEILING_PCT = 80.0
+# On 8GB macOS: baseline OS uses ~50% (4GB). At 90% ceiling = 7.2GB.
+# This provides more headroom for VLMs on memory-constrained systems.
+MEMORY_CEILING_PCT = 90.0
 # Ollama-based VLMs are out-of-process; use a higher threshold.
 MEMORY_CEILING_PCT_OLLAMA = 95.0
 
@@ -1001,10 +1001,10 @@ def index_document(
             if existing_record and existing_record.ingest_status in ("ready", "partial") and existing_record.chunk_count > 0:
                 # Check file modification time
                 current_mtime = os.path.getmtime(str(filepath))
-                last_indexed = getattr(existing_record, "last_indexed_mtime", None)
-                if last_indexed is not None and abs(current_mtime - last_indexed) < 1.0:
+                last_indexed = getattr(existing_record, "last_indexed_mtime", 0.0)
+                if last_indexed > 0 and abs(current_mtime - last_indexed) < 1.0:
                     logger.info(
-                        "Idempotency Guard: '%s' already indexed with %d chunks (status=%s, file unchanged) — skipping.",
+                        "Idempotency Guard: '%s' already indexed with %d chunks (status=%s, file unchanged) — skipping indexing.",
                         source_name, existing_record.chunk_count, existing_record.ingest_status,
                     )
                     return {

@@ -48,6 +48,9 @@ chmod +x install.sh && ./install.sh
 
 # Start only frontend
 ./run_dev.sh --frontend-only
+
+# Start without Docker services
+./run_dev.sh --no-docker
 ```
 
 ### Testing
@@ -63,6 +66,15 @@ pytest --cov=src
 
 # Run specific test function
 pytest tests/test_chat_contract.py::test_split_reasoning_trace_complete_block
+
+# Run tests in verbose mode
+pytest -v
+
+# Run tests with output capturing disabled
+pytest -s
+
+# Run tests matching a pattern
+pytest -k "test_reasoning"
 ```
 
 ### Linting and Formatting
@@ -75,6 +87,9 @@ ruff check --fix src
 
 # Type checking
 mypy src
+
+# Format code
+black src
 ```
 
 ### Building
@@ -84,6 +99,36 @@ uv build
 
 # Build Tauri desktop app
 npm run tauri:build
+
+# Build frontend assets
+npm run build
+```
+
+### Frontend Development
+```bash
+# Start frontend dev server
+npm run dev
+
+# Run frontend linting
+npm run lint
+
+# Run TypeScript type checking
+npm run type-check
+
+# Format frontend code
+npm run format
+```
+
+### Docker Services
+```bash
+# Start optional self-hosted services (Langfuse, Neo4j, OPA)
+docker compose up -d
+
+# Stop Docker services
+docker compose down
+
+# View Docker service logs
+docker compose logs -f
 ```
 
 ## Architecture Overview
@@ -109,6 +154,29 @@ npm run tauri:build
 5. **Silicon Colosseum** (`src/guardrails/`): Deterministic alignment using OPA policies
 6. **StreamSync** (`src/modules/streamsync/`): Live folder monitoring and RSS integration
 
+### Core Services Architecture
+The application uses a dependency injection container (`src/core/container.py`) that manages the lifecycle of core services:
+- **ReplayBuffer**: Stores interaction history for continual learning
+- **HistoryManager**: Manages conversation history
+- **VectorStore**: ChromaDB for dense retrieval
+- **SparseIndex**: SQLite FTS5 for sparse retrieval
+- **SessionStore**: Encrypted SQLite storage for chat sessions
+- **SiliconColosseum**: OPA-based policy enforcement
+- **MetaAgent**: LangGraph supervisor for reasoning workflows
+- **DocumentIntelligence**: VLM-based document processing
+- **SyncManager**: Peer-to-peer synchronization
+
+### Module Plugins
+The system is extensible through module plugins located in `src/modules/`:
+- **CoreModule**: Essential tools and utilities
+- **WatchTowerModule**: System monitoring and observability
+- **StreamSyncModule**: Live folder and RSS monitoring
+- **AnalyticsModule**: Usage statistics and insights
+- **RagForgeModule**: Cognitive retrieval pipeline
+- **TuneLabModule**: Learning monitoring and visualization
+- **LocalBuddyModule**: Local AI assistant capabilities
+- **SyncModule**: Peer-to-peer synchronization tools
+
 ## Common Development Tasks
 
 ### Adding a New Module
@@ -130,3 +198,19 @@ npm run tauri:build
 - Tests use extensive mocking to avoid heavy dependencies
 - Fixtures in `conftest.py` provide consistent test environments
 - Use `tmp_path` fixture for temporary data directories
+- Run individual tests with `pytest tests/test_file.py::test_function_name`
+
+### Environment Configuration
+The application uses environment variables defined in `.env` for configuration:
+- **Model Settings**: BITNET_MODEL_PATH, BITNET_N_CTX, BITNET_N_GPU_LAYERS
+- **Storage Paths**: DATA_DIR, CHROMA_PATH, REPLAY_BUFFER_PATH
+- **Security**: SQLCIPHER_KEY_FILE for encrypted storage
+- **Telemetry**: LANGFUSE_* settings for optional self-hosted telemetry
+- **Network**: AETHERFORGE_HOST, AETHERFORGE_PORT for server configuration
+
+### Background Services
+Several background services run continuously:
+- **RSS Poller**: Periodically checks RSS feeds for updates
+- **Directory Watcher**: Monitors LiveFolder for file changes
+- **Scheduler**: Runs periodic jobs like nightly OPLoRA training
+- **Sync Manager**: Handles peer-to-peer synchronization
