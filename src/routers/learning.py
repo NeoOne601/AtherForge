@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/v1", tags=["Learning"])
 
 @router.post("/learning/trigger")
 async def trigger_training(request: Request) -> JSONResponse:
-    from src.main import _nightly_oplora_job  # Temporary import until main is refactored
+    from src.learning.tasks import _nightly_oplora_job
 
     safe_create_task(_nightly_oplora_job(request.app, force=True), name="nightly_oplora")
     return JSONResponse({"status": "triggered", "message": "OPLoRA training job started"})

@@ -1309,6 +1309,41 @@ class MetaAgent:
             ),
         ]
         return self._run_llm_sync(summary_messages, temperature=0.3)
+    def _detect_and_inject_system_knowledge(self, message: str, current_context: str) -> str:
+        """
+        If the user asks about the application itself, bootstrap context from the manual.
+        Returns the updated context string.
+        """
+        q_lower = message.lower()
+        system_triggers = {
+            "aetherforge", "the app", "how to use", "manual", 
+            "features", "capabilities", "instruction", "how do i"
+        }
+        
+        if not any(trigger in q_lower for trigger in system_triggers):
+            return current_context
+
+        logger.info("System Knowledge intent detected", query=message[:50])
+        try:
+            # Retrieve from the manual (indexed as AetherForge_User_Manual_v1.0.md)
+            manual_docs = self._hybrid_search(
+                query=message,
+                k=4,
+                source_filter="AetherForge_User_Manual_v1.0.md"
+            )
+            if manual_docs:
+                manual_text = "\n\n".join([f"FROM MANUAL: {d.page_content}" for d in manual_docs])
+                updated_context = current_context + (
+                    f"\n\nSYSTEM KNOWLEDGE (AetherForge Manual):\n{manual_text}\n"
+                    "Use the above information to answer questions about the application's "
+                    "operations, features, and troubleshooting.\n"
+                )
+                return updated_context
+        except Exception as e:
+            logger.warning("System knowledge retrieval failed", error=str(e))
+        
+        return current_context
+
 
     async def run(self, inp: MetaAgentInput) -> MetaAgentOutput:
         """
@@ -1401,9 +1436,12 @@ class MetaAgent:
         )
         module_context = _MODULE_CONTEXTS.get(main_module, "")
 
+        # ── 3a. System Knowledge Intent Detection ────────────────
+        module_context = self._detect_and_inject_system_knowledge(inp.message, module_context)
+
         if inp.system_location:
             module_context += (
-                f"\n\nUSER LOCATION: The user is currently located in {inp.system_location}. "
+                f"\n\nUSER LOCATION: {inp.system_location}. "
                 f"When the user says 'my location', 'my city', 'here', or 'where I am', "
                 f"always use '{inp.system_location}' as the location argument.\n"
             )
@@ -2076,6 +2114,9 @@ class MetaAgent:
         
         main_module = inp.module if inp.module in _MODULE_CONTEXTS else "localbuddy"
         module_context = _MODULE_CONTEXTS.get(main_module, "")
+        
+        # ── 2a. System Knowledge Intent Detection ────────────────
+        module_context = self._detect_and_inject_system_knowledge(inp.message, module_context)
         
         from src.core.tool_registry import tool_registry # type: ignore
         tools = tool_registry.get_tool_definitions()

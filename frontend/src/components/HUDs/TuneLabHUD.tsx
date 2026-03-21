@@ -96,21 +96,26 @@ export function TuneLabHUD() {
                 Tracks the AI's learning progress. "Loss" going down means the AI is getting smarter and making fewer mistakes.
             </div>
             {trainingHistory.length > 0 ? (
-                <div style={{ background: "rgba(0,0,0,0.2)", borderRadius: "12px", padding: "16px", marginBottom: "24px", border: "1px solid var(--border)" }}>
-                    <div style={{ display: "flex", alignItems: "flex-end", gap: "4px", height: "60px", marginBottom: "12px" }}>
-                        {trainingHistory.map((run, i) => (
-                            <div key={i} title={`Loss: ${run.training_loss?.toFixed(4)}\nSamples: ${run.samples_used}`} style={{
-                                flex: 1,
-                                background: "var(--brand-glow)",
-                                height: `${Math.max(10, Math.min(100, (1 - run.training_loss) * 100))}%`,
-                                borderRadius: "2px",
-                                opacity: 0.8
-                            }} />
-                        ))}
+                <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: "12px", padding: "20px", marginBottom: "24px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: "6px", height: "120px", marginBottom: "16px", borderBottom: "1px solid rgba(255,255,255,0.1)", paddingBottom: "2px" }}>
+                        {trainingHistory.map((run, i) => {
+                            const h = Math.max(15, Math.min(100, (1 - (run.training_loss || 0)) * 100));
+                            return (
+                                <div key={i} title={`Task: ${run.task_id}\nLoss: ${run.training_loss?.toFixed(4)}\nSamples: ${run.samples_used}`} style={{
+                                    flex: 1,
+                                    background: "linear-gradient(to top, var(--brand-glow), var(--volt))",
+                                    height: `${h}%`,
+                                    borderRadius: "3px 3px 0 0",
+                                    minWidth: "12px",
+                                    boxShadow: "0 0 10px rgba(var(--brand-glow-rgb, 120, 80, 255), 0.4)",
+                                    transition: "height 0.5s ease-out"
+                                }} />
+                            );
+                        })}
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: "var(--text-muted)" }}>
-                        <span>Past {trainingHistory.length} Runs (Inverse Loss)</span>
-                        <span>Latest Loss: {trainingHistory[trainingHistory.length - 1]?.training_loss?.toFixed(4) || "0.0000"}</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontWeight: 500 }}>
+                        <span style={{ color: "var(--text-muted)" }}>📈 Performance Evolution (Inverse Loss)</span>
+                        <span style={{ color: "var(--volt-bright)" }}>Current Error: {(trainingHistory[trainingHistory.length - 1]?.training_loss * 100).toFixed(1)}%</span>
                     </div>
                 </div>
             ) : (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -178,6 +179,26 @@ class Container:
         app_state.meta_agent = self.get_service("meta_agent")
         app_state.document_registry = self.get_service("document_registry")
         app_state.document_intelligence = self.get_service("document_intelligence")
+        
+        # 9. Bootstrap System Knowledge
+        await self._bootstrap_system_knowledge()
+
+    async def _bootstrap_system_knowledge(self) -> None:
+        """Automatically index the application manual for self-knowledge."""
+        manual_path = self.settings.system_manual_path
+        if not manual_path.exists():
+            manual_path = Path("AetherForge_User_Manual_v1.0.md") # Fallback to root
+            
+        if manual_path.exists():
+            logger.info("Bootstrapping system knowledge from manual", path=str(manual_path))
+            doc_intel = self.get_service("document_intelligence")
+            try:
+                # We use ingest_path which handles mtime-based idempotency
+                await doc_intel.ingest_path(manual_path)
+            except Exception as e:
+                logger.error("Failed to bootstrap system knowledge", error=str(e))
+        else:
+            logger.warning("System manual not found; AI self-knowledge will be limited", path=str(manual_path))
 
     async def shutdown_all(self) -> None:
         """Gracefully shut down all services."""

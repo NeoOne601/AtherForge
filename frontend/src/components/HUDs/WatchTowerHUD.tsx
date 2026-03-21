@@ -134,6 +134,18 @@ export function WatchTowerHUD() {
             setIncidents(prev => prev.map(i => i.id === incident.id ? { ...i, status: "resolved" } : i));
         } catch (e) { console.error(e); }
     };
+    
+    const handleRetry = async (doc: LiveFolderFile) => {
+        if (!doc.document_id) return;
+        try {
+            await fetch(`/api/v1/ragforge/documents/${doc.document_id}/retry`, {
+                method: "POST"
+            });
+            // Status will update on next poll
+        } catch (err) {
+            console.error("Retry failed", err);
+        }
+    };
 
     const getMetric = (key: string, defaultVal: number = 0) =>
         metrics[key] || { value: defaultVal, z_score: 0.0, is_anomaly: false };
@@ -266,6 +278,25 @@ export function WatchTowerHUD() {
                                     {/* Error tooltip */}
                                     {f.last_error && (
                                         <span title={f.last_error} style={{ cursor: "help", color: "var(--danger)", fontSize: "13px" }}>⚠</span>
+                                    )}
+
+                                    {/* Re-Process action */}
+                                    {(f.status === "failed" || (f.status === "ready" && f.chunk_count === 0)) && f.document_id && (
+                                        <button 
+                                            onClick={() => handleRetry(f)}
+                                            style={{
+                                                background: "rgba(255,255,255,0.05)",
+                                                border: "1px solid var(--border)",
+                                                color: "var(--fg-muted)",
+                                                borderRadius: "4px",
+                                                padding: "1px 6px",
+                                                fontSize: "10px",
+                                                cursor: "pointer"
+                                            }}
+                                            title="Force re-ingest this file"
+                                        >
+                                            RE-PROCESS
+                                        </button>
                                     )}
                                 </div>
                             );

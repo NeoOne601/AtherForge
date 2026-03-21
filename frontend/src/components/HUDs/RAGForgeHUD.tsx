@@ -254,7 +254,13 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                             <span className="doc-name" style={{ flex: 1, opacity: d.active ? 1 : 0.5 }}>{d.name}</span>
                             <span className="doc-meta" style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                                 {d.status === "ready"
-                                    ? <span style={{ color: "var(--plasma)" }}>● {d.status}</span>
+                                    ? <span style={{ color: "var(--aether)", display: "flex", alignItems: "center", gap: "4px" }}>
+                                        {d.status === "ready" && (d.chunk_count || 0) === 0 ? (
+                                            <span style={{ color: "var(--ember)" }} title="Document marked as ready but index is empty. Click 'Fix Index' below.">⚠️ {d.status}</span>
+                                        ) : (
+                                            <span style={{ color: "var(--plasma)" }}>● {d.status}</span>
+                                        )}
+                                      </span>
                                     : d.status === "ocr_running" || d.status === "extracting_text"
                                     ? <span style={{ color: "var(--aether)", display: "flex", alignItems: "center", gap: "4px" }}>
                                         <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
@@ -268,7 +274,14 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                                       </span>
                                     : <span style={{ color: d.status === "failed" ? "var(--ember)" : "var(--aether)" }}>○ {d.status}</span>
                                 }
-                                <span style={{ color: "var(--fg-muted)", fontSize: "11px" }}>{d.tokens}</span>
+                                                                 <span style={{ 
+                                    color: (d.status === "ready" && (d.chunk_count || 0) === 0) ? "var(--ember)" : "var(--fg-muted)", 
+                                    fontSize: "11px",
+                                    fontWeight: (d.status === "ready" && (d.chunk_count || 0) === 0) ? 700 : 400
+                                 }}>
+                                    {(d.status === "ready" && (d.chunk_count || 0) === 0) ? "0 chunks (indexing error)" : d.tokens}
+                                 </span>
+
                                 {/* Real-time progress bar for active ingestion */}
                                 {(() => {
                                     const prog = ingestionProgress[d.name];
@@ -356,25 +369,37 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                                         🖼 Enrich Images
                                     </button>
                                 )}
-                                {(d.status === "failed" || d.status === "ocr_pending") && (
+                                {d.status === "ready" && (d.chunk_count || 0) === 0 && (
+                                    <span 
+                                        style={{ color: "var(--ember)", fontSize: "16px", cursor: "help" }} 
+                                        title="This document reached 'ready' with 0 chunks. This usually happens with scanned PDFs. Try 'Enrich Images' or 'Re-Process' below."
+                                    >
+                                        💡
+                                    </span>
+                                )}
+                                {(d.status === "failed" || d.status === "ocr_pending" || (d.status === "ready" && (d.chunk_count || 0) === 0)) && (
                                     <button 
                                         onClick={() => handleRetry(d)}
                                         className="repair-btn"
+                                        title={(d.status === "ready" && (d.chunk_count || 0) === 0) 
+                                            ? "Force a full re-process of this document." 
+                                            : "Retry failed ingestion"}
                                         style={{
-                                            background: "rgba(255,100,100,0.1)",
-                                            border: "1px solid var(--ember)",
-                                            color: "var(--ember)",
+                                            background: (d.status === "ready" && (d.chunk_count || 0) === 0) ? "rgba(var(--plasma-rgb, 100,100,255), 0.1)" : "rgba(255,100,100,0.1)",
+                                            border: (d.status === "ready" && (d.chunk_count || 0) === 0) ? "1px solid var(--plasma)" : "1px solid var(--ember)",
+                                            color: (d.status === "ready" && (d.chunk_count || 0) === 0) ? "var(--plasma)" : "var(--ember)",
                                             borderRadius: "4px",
                                             padding: "2px 8px",
                                             fontSize: "10px",
                                             cursor: "pointer",
                                             textTransform: "uppercase",
-                                            letterSpacing: "0.5px"
+                                            letterSpacing: "0.5px",
+                                            fontWeight: 600
                                         }}
                                     >
-                                        Repair
+                                        {(d.status === "ready" && (d.chunk_count || 0) === 0) ? "Re-Process" : "Repair"}
                                     </button>
-                                )}
+                                 )}
                             </span>
                         </div>
                     ))}

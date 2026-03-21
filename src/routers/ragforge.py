@@ -68,8 +68,7 @@ async def retry_document_ingest(document_id: str, request: Request) -> JSONRespo
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"Source file '{record.source}' not found on disk.")
 
-    logger.info("Manual retry triggered for document", source=record.source, document_id=document_id)
-    result = await state.document_intelligence.ingest_path(file_path)
+    result = await state.document_intelligence.ingest_path(file_path, force=True)
     return JSONResponse(result)
 
 
@@ -233,7 +232,7 @@ async def force_reindex_document(document_id: str, request: Request) -> JSONResp
     state.document_registry.update_document(
         document_id, ingest_status="extracting_text", last_error=None, chunk_count=0
     )
-    result = await state.document_intelligence.ingest_path(file_path)
+    result = await state.document_intelligence.ingest_path(file_path, force=True)
     return JSONResponse(result)
 
 
@@ -316,3 +315,20 @@ async def get_ingestion_progress() -> JSONResponse:
         }
 
     return JSONResponse({"progress": progress_data})
+
+
+class PageHitRequest(BaseModel):
+    source: str
+    page: int
+
+
+@router.post("/record-hit")
+async def record_page_hit(payload: PageHitRequest, request: Request) -> JSONResponse:
+    """
+    Record that a user has 'accessed' or 'viewed' a specific page.
+    This increases the priority of this page in the VLM enrichment queue.
+    """
+    state = request.app.state.app_state
+    state.document_registry.record_page_hit(payload.source, payload.page)
+    logger.info("Page hit recorded (Priority +1)", source=payload.source, page=payload.page)
+    return JSONResponse({"status": "ok", "source": payload.source, "page": payload.page})

@@ -40,6 +40,7 @@ class AppState:
     directory_watcher: Any = None
     system_location: str | None = None
     sync_manager: Any = None
+    oplora_running: bool = False
 
 
 class ChatRequest(BaseModel):

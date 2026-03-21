@@ -76,6 +76,7 @@ class AetherForgeSettings(BaseSettings):
     replay_buffer_path: Path = Path("./data/replay_buffer.parquet")
     sqlcipher_key_file: Path = Path("./data/.db_key")
     chroma_path: Path = Path("./data/chroma")
+    system_manual_path: Path = Path("./AetherForge_User_Manual_v1.0.md")
 
     # ── Telemetry (local Langfuse) ────────────────────────────────
     langfuse_enabled: bool = False

@@ -48,9 +48,10 @@ function parseAttachments(content: string): { cleanedAnswer: string; attachments
 interface MessageBubbleProps {
     msg: Message;
     showThinking?: boolean;
+    onSuggestionClick?: (suggestion: string) => void;
 }
 
-export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) {
+export function MessageBubble({ msg, showThinking = true, onSuggestionClick }: MessageBubbleProps) {
     const isUser = msg.role === "user";
     const fScore = msg.faithfulness_score;
 
@@ -180,13 +181,14 @@ export function MessageBubble({ msg, showThinking = true }: MessageBubbleProps) 
                 {!isUser && suggestions.length > 0 && (
                     <div style={{ marginTop: "12px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
                         {suggestions.map((suggestion) => (
-                            <span
+                            <button
                                 key={suggestion}
+                                type="button"
                                 className="chip"
-                                style={{ cursor: "default", opacity: 0.85 }}
+                                onClick={() => onSuggestionClick?.(suggestion)}
                             >
                                 {suggestion}
-                            </span>
+                            </button>
                         ))}
                     </div>
                 )}

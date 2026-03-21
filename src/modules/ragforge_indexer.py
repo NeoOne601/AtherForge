@@ -923,10 +923,8 @@ def load_document(
 
             loader = CSVLoader(str(filepath), csv_args={"delimiter": "\t" if ext == ".tsv" else ","})
             docs = loader.load()
-            for doc in docs:
-                doc.metadata["source"] = filepath.name
-                doc.metadata["chunk_type"] = "table"
-                doc.metadata["parser"] = "csvloader" if ext == ".csv" else "tsvloader"
+            if chunk_callback:
+                chunk_callback(docs)
             return docs, []
 
         elif ext in (".txt", ".md", ".json"):
@@ -945,6 +943,9 @@ def load_document(
                 chunk.metadata["source"] = filepath.name
                 chunk.metadata["chunk_type"] = "section"
                 chunk.metadata["parser"] = "jsonloader" if ext == ".json" else "textloader"
+            
+            if chunk_callback:
+                chunk_callback(chunks)
             return chunks, []
 
         else:

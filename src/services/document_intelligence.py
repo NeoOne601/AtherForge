@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +32,31 @@ class DocumentIntelligenceService:
         self.document_registry = document_registry
         self._selected_vlm_id_getter = selected_vlm_id_getter
 
-    async def ingest_path(self, file_path: Path) -> dict[str, Any]:
+    async def ingest_path(self, file_path: Path, force: bool = False) -> dict[str, Any]:
         source = file_path.name
         file_type = file_path.suffix.lower().lstrip(".") or "unknown"
+        # ── High-Level Idempotency Guard ─────────────────────────────
+        # Check if we already have a successful index for this file
+        # with matching modification time BEFORE resetting the status.
+        existing = self.document_registry.get_by_source(source)
+        if not force and existing and existing.ingest_status in ("ready", "partial"):
+            # INTELLIGENT DETECTION: If chunks are 0, we must re-index anyway
+            if int(existing.chunk_count or 0) > 0:
+                try:
+                    current_mtime = os.path.getmtime(str(file_path))
+                    last_indexed = float(existing.last_indexed_mtime or 0.0)
+                    if last_indexed > 0 and abs(current_mtime - last_indexed) < 1.0:
+                        logger.info(
+                            "Ingestion Skip: '%s' is already %s and unchanged. Skipping.",
+                            source,
+                            existing.ingest_status,
+                        )
+                        return self._build_response(existing)
+                except Exception as e:
+                    logger.debug("Idempotency mtime check failed", source=source, error=str(e))
+            else:
+                logger.info("Intelligent Recovery: '%s' is ready but has 0 chunks. Forcing re-index.", source)
+
         record = self.document_registry.upsert_document(
             source=source,
             file_type=file_type,
@@ -140,6 +163,7 @@ class DocumentIntelligenceService:
                 vector_store=self.vector_store,
                 vlm_id=str(self._selected_vlm_id_getter() or "smolvlm-256m"),
                 sparse_index=self.sparse_index,
+                document_registry=self.document_registry,
             )
             if not isinstance(result, dict):
                 # Fallback for unexpected return types

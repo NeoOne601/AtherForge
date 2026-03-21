@@ -16,12 +16,34 @@ async def async_vlm_enrich(
     vector_store: Any,
     vlm_id: str,
     sparse_index: Any,
+    document_registry: Any = None,
 ) -> dict[str, Any]:
     """
     Background task: run selected VLM on image-bearing pages.
+    Prioritizes pages based on user attention (hits) if document_registry is provided.
     """
     if not image_pages:
         return {"status": "no_images", "chunks_added": 0, "vlm_id": vlm_id}
+
+    # ── Priority Sorting ──────────────────────────────────────────
+    if document_registry is not None:
+        try:
+            priority_pages = document_registry.get_page_priority(file_path.name)
+            if priority_pages:
+                # Move priority pages to the front, preserving relative order of the rest
+                p_set = set(priority_pages)
+                high_p = [p for p in image_pages if p in p_set]
+                low_p = [p for p in image_pages if p not in p_set]
+                # Further sort high_p by the actual hit count order from priority_pages
+                high_p.sort(key=lambda x: priority_pages.index(x))
+                image_pages = high_p + low_p
+                logger.info(
+                    "Priority Ingestion: moved %d attention-heavy pages to front for '%s'",
+                    len(high_p),
+                    file_path.name,
+                )
+        except Exception as e:
+            logger.debug("Priority sorting failed (non-fatal): %s", e)
 
     from src.modules.ragforge_indexer import MEMORY_CEILING_PCT, MEMORY_CEILING_PCT_OLLAMA
 

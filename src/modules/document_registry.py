@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(ingest_status);
+
+CREATE TABLE IF NOT EXISTS page_attention (
+    source      TEXT NOT NULL,
+    page        INTEGER NOT NULL,
+    hit_count   INTEGER NOT NULL DEFAULT 0,
+    last_hit_at REAL NOT NULL,
+    PRIMARY KEY (source, page)
+);
+CREATE INDEX IF NOT EXISTS idx_page_attention_hits ON page_attention(source, hit_count DESC);
 """
 
 
@@ -71,6 +80,14 @@ class DocumentRegistry:
         with self._write_lock:
             conn = self._get_conn()
             conn.executescript(_SCHEMA)
+            
+            # Migration: Ensure last_indexed_mtime exists in documents table
+            cursor = conn.execute("PRAGMA table_info(documents)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            
+            if "last_indexed_mtime" not in columns:
+                conn.execute("ALTER TABLE documents ADD COLUMN last_indexed_mtime REAL NOT NULL DEFAULT 0.0")
+            
             conn.commit()
 
     def upsert_document(
@@ -90,7 +107,7 @@ class DocumentRegistry:
         with self._write_lock:
             conn = self._get_conn()
             existing = conn.execute(
-                "SELECT document_id, created_at, selected FROM documents WHERE source = ?",
+                "SELECT document_id, created_at, selected, last_indexed_mtime FROM documents WHERE source = ?",
                 (source,),
             ).fetchone()
             if existing:
@@ -112,7 +129,7 @@ class DocumentRegistry:
                         int(chunk_count),
                         int(image_pages_pending),
                         last_error,
-                        last_indexed_mtime if last_indexed_mtime is not None else float(existing.get("last_indexed_mtime", 0.0)),
+                        last_indexed_mtime if last_indexed_mtime is not None else float(existing["last_indexed_mtime"]),
                         selected_value if selected is None else (1 if selected else 0),
                         now,
                         source,
@@ -222,6 +239,31 @@ class DocumentRegistry:
             "SELECT source FROM documents WHERE selected = 1"
         ).fetchall()
         return [str(row["source"]) for row in rows]
+
+    def record_page_hit(self, source: str, page: int) -> None:
+        """Increment the attention score for a specific page."""
+        now = time.time()
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.execute(
+                """
+                INSERT INTO page_attention (source, page, hit_count, last_hit_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(source, page) DO UPDATE SET
+                    hit_count = hit_count + 1,
+                    last_hit_at = excluded.last_hit_at
+                """,
+                (source, page, now),
+            )
+            conn.commit()
+
+    def get_page_priority(self, source: str) -> list[int]:
+        """Return page numbers for a source, ordered by hit_count DESC."""
+        rows = self._get_conn().execute(
+            "SELECT page FROM page_attention WHERE source = ? ORDER BY hit_count DESC",
+            (source,),
+        ).fetchall()
+        return [int(row["page"]) for row in rows]
 
     def _row_to_record(self, row: sqlite3.Row) -> DocumentRecord:
         return DocumentRecord(

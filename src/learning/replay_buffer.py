@@ -265,12 +265,12 @@ class ReplayBuffer:
             dataset = pq.ParquetDataset(str(self._root_path))
             table = dataset.read()
 
-            # Filters
-            mask = pc.field("faithfulness_score") >= min_faithfulness
+            # Filters (Using operator overloading for compatibility)
+            mask = (pc.field("faithfulness_score") >= min_faithfulness)
             if module:
-                mask = pc.and_(mask, pc.field("module") == module)
+                mask = mask & (pc.field("module") == module)
             if exclude_used:
-                mask = pc.and_(mask, pc.field("is_used_for_training") == pc.scalar(False))
+                mask = mask & (pc.field("is_used_for_training") == False)
 
             filtered_table = table.filter(mask)
 

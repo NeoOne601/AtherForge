@@ -94,28 +94,32 @@ class BitNetTrainer:
         self._checkpoint_dir = settings.data_dir / "lora_checkpoints"
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    async def run_oploora_cycle(self) -> TrainingResult:
+    async def run_oploora_cycle(self, force: bool = False) -> TrainingResult:
         """
         Full nightly OPLoRA cycle. Runs in a background task.
         All heavy operations are dispatched to thread executor.
         """
         task_id = f"nightly_{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M%S')}"
-        logger.info("Starting OPLoRA cycle: task_id=%s", task_id)
+        logger.info("Starting OPLoRA cycle", task_id=task_id, force=force)
         t0 = time.perf_counter()
 
         # ── 1. Sample from replay buffer ──────────────────────────
         emit_event("training_started", payload={"task_id": task_id}, source="TuneLab")
+        
+        # Lower threshold if forced (user-triggered)
+        min_required = 1 if force else 10
+        
         samples = await self.replay_buffer.sample(
             n=self.settings.oplora_epochs * 100,  # e.g., 300 samples
             min_faithfulness=0.85,
             exclude_used=True,
         )
 
-        if len(samples) < 10:
-            logger.info("Not enough new samples for training: %d < 10", len(samples))
+        if len(samples) < min_required:
+            logger.info("Insufficient training data", task_id=task_id, count=len(samples), required=min_required)
             emit_event(
                 "training_aborted",
-                payload={"reason": "insufficient_samples", "count": len(samples)},
+                payload={"reason": "insufficient_samples", "count": len(samples), "required": min_required},
                 source="TuneLab",
             )
             return TrainingResult(

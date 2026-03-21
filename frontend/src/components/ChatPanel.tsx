@@ -203,6 +203,20 @@ export function ChatPanel({
         }
     }, [module]);
 
+    const handleSuggestionClick = useCallback((suggestion: string) => {
+        setInput(suggestion);
+        if (textareaRef.current) {
+            textareaRef.current.focus();
+            // Trigger autosize
+            setTimeout(() => {
+                if (textareaRef.current) {
+                    textareaRef.current.style.height = "auto";
+                    textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + "px";
+                }
+            }, 0);
+        }
+    }, []);
+
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages, loading]);
@@ -446,7 +460,7 @@ export function ChatPanel({
                     ) : (
                         <>
                             {messages.map(m => (
-                                <MessageBubble key={m.id} msg={m} showThinking={showThinking} />
+                                <MessageBubble key={m.id} msg={m} showThinking={showThinking} onSuggestionClick={handleSuggestionClick} />
                             ))}
                             {loading && !messages.some(m => m.streaming) && (
                                 <div className="message-row">

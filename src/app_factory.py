@@ -54,18 +54,7 @@ from src.utils import safe_create_task
 logger = structlog.get_logger("aetherforge.factory")
 
 
-async def _nightly_oplora_job(app: FastAPI, force: bool = False) -> None:
-    """Nightly background job for OPLoRA fine-tuning."""
-    state: AppState = app.state.app_state
-    logger.info("OPLoRA job starting", force=force)
-    try:
-        from src.learning.oplora_manager import OPLoRAManager
-
-        manager = OPLoRAManager(state.settings)
-        await manager.run_evolution_loop(state.replay_buffer, state.history_manager)
-        logger.info("OPLoRA job complete")
-    except Exception as e:
-        logger.error("OPLoRA job failed", error=str(e))
+from src.learning.tasks import _nightly_oplora_job
 
 
 @asynccontextmanager
