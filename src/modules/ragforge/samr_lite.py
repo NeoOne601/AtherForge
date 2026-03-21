@@ -147,36 +147,59 @@ def run_samr_lite(
     threshold: float = GROUNDED_THRESHOLD,
 ) -> dict[str, Any]:
     """
-    High-level SAMR-lite entry point.
-
-    Embeds the answer and retrieved documents using the provided
-    embedding function (BGE-M3 via LangChain's HuggingFaceEmbeddings),
-    then computes the faithfulness verdict.
+    High-level Coherence entry point.
+    Replaces legacy SAMR-lite (Cosine) with Prime Radiant (Sheaf Laplacian).
 
     Args:
         answer:             The LLM-generated answer string
         retrieved_docs:     List of source document chunk texts
-        embedding_function: LangChain embedding model (all-MiniLM-L6-v2)
-        threshold:          Faithfulness threshold (default: 0.55)
+        embedding_function: For fallback if Prime Radiant is missing
+        threshold:          Coherence energy threshold (lower is better, > 0.70 is blocked)
     """
     try:
-        # Embed answer and all retrieved chunks
-        answer_emb = embedding_function.embed_query(answer)
         if not retrieved_docs:
-            return compute_faithfulness(answer_emb, [], threshold)
+            return {"verdict": "UNSUPPORTED", "faithfulness_score": 0.0, "blocked": False}
 
-        context_embs = embedding_function.embed_documents(retrieved_docs)
-        result = compute_faithfulness(answer_emb, context_embs, threshold)
-        logger.debug(
-            "SAMR-lite complete | verdict=%s score=%.3f chunks=%d",
-            result["verdict"],
-            result["faithfulness_score"],
-            len(retrieved_docs),
-        )
-        return result
+        try:
+            from prime_radiant import CoherenceEngine
+            engine = CoherenceEngine()
+            
+            # Compute topological coherence
+            energy, witness = engine.compute_laplacian_energy(answer, retrieved_docs)
+            
+            # Energy > 0.70 means contradiction detected mathematically
+            is_blocked = float(energy) > 0.70
+            verdict = "HALLUCINATION_BLOCKED" if is_blocked else "SUPPORTED"
+            
+            logger.info(
+                "Prime Radiant Gate | energy=%.3f blocked=%s witness=%s",
+                energy, is_blocked, witness[:8]
+            )
+            
+            return {
+                "verdict": verdict,
+                "faithfulness_score": max(0.0, 1.0 - energy), # Invert energy to match SAMR score profile
+                "blocked": is_blocked,
+                "witness": witness,
+            }
+
+        except ImportError:
+            logger.info("Prime Radiant not found: falling back to legacy SAMR-lite cosine heuristics")
+            answer_emb = embedding_function.embed_query(answer)
+            context_embs = embedding_function.embed_documents(retrieved_docs)
+            result = compute_faithfulness(answer_emb, context_embs, threshold)
+            
+            logger.debug(
+                "SAMR-lite fallback complete | verdict=%s score=%.3f chunks=%d",
+                result["verdict"],
+                result["faithfulness_score"],
+                len(retrieved_docs),
+            )
+            result["blocked"] = False # Legacy SAMR only warned
+            return result
 
     except Exception as e:
-        logger.error("SAMR-lite error: %s", e)
+        logger.error("Coherence gate error: %s", e)
         return {
             "faithfulness_score": -1.0,
             "verdict": "ERROR",

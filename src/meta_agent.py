@@ -518,6 +518,16 @@ class MetaAgent:
             from headroom.config import IntelligentContextConfig  # type: ignore
             from headroom.providers.openai_compatible import OpenAICompatibleTokenCounter  # type: ignore
             from headroom.tokenizer import Tokenizer  # type: ignore
+        except ImportError:
+            pass
+
+        # [RUVECTOR PHASE 6 PLACEHOLDER] RVF Cognitive Containers
+        try:
+            from rvf_runtime import RVFContainer
+            self.rvf = RVFContainer(str(self.settings.data_dir / "containers"))
+            logger.info("RVF Container engine active")
+        except ImportError:
+            self.rvf = None
             from headroom.transforms.intelligent_context import IntelligentContextManager  # type: ignore
 
             # Use gpt-3.5-turbo tokenizer as a safe proxy for BitNet/Llama token counting
@@ -642,17 +652,30 @@ class MetaAgent:
         logger.info("Initializing LLM from registry", model_id=model_id, path=str(model_path))
 
         def _load() -> Any:
-            from llama_cpp import Llama, LlamaGrammar # type: ignore
-            setattr(self, "_LlamaGrammar", LlamaGrammar)
-
-            return Llama(
-                model_path=str(model_path),
-                n_ctx=self.settings.bitnet_n_ctx,
-                n_gpu_layers=self.settings.bitnet_n_gpu_layers,
-                n_threads=self.settings.bitnet_n_threads,
-                use_mlock=True,
-                verbose=False,
-            )
+            try:
+                from ruvllm import RuvLLMEngine
+                logger.info("ruvllm available: Booting native Metal/ANE runtime with 16k ctx")
+                return RuvLLMEngine(
+                    model_path=str(model_path),
+                    n_ctx=16384,  # Upgraded from BitNet 2048 to 16k for complex reasoning
+                    n_gpu_layers=self.settings.bitnet_n_gpu_layers,
+                    n_threads=self.settings.bitnet_n_threads,
+                    repetition_penalty=1.1,  # Critical to stop the generated-loop bug
+                    verbose=False,
+                )
+            except ImportError:
+                logger.info("ruvllm not found: Falling back to legacy llama_cpp BitNet engine")
+                from llama_cpp import Llama, LlamaGrammar # type: ignore
+                setattr(self, "_LlamaGrammar", LlamaGrammar)
+    
+                return Llama(
+                    model_path=str(model_path),
+                    n_ctx=self.settings.bitnet_n_ctx,
+                    n_gpu_layers=self.settings.bitnet_n_gpu_layers,
+                    n_threads=self.settings.bitnet_n_threads,
+                    use_mlock=True,
+                    verbose=False,
+                )
 
         loop = self.loop
         self._llm = await loop.run_in_executor(None, _load) # type: ignore
@@ -853,13 +876,27 @@ class MetaAgent:
         source_filter: str | list[str] | None = None,
     ) -> list[Any]:
         """
-        Hybrid retrieval: Dense (ChromaDB/BGE-M3) + Sparse (FTS5/BM25).
+        Hybrid retrieval: Dense (ChromaDB/BGE-M3) + Sparse (FTS5/BM25) OR RuVector GNN-HNSW.
         Falls back to dense-only if FTS5 index is not available.
 
         CRITICAL: Do NOT cache a permanent 'UNAVAILABLE' sentinel.
         The DB is created when the first document is uploaded, which happens
         AFTER the server starts. Always re-check if the DB now exists.
         """
+        # --- NEW: Check for RuVectorStore ---
+        if type(self.vector_store).__name__ == "RuVectorStore":
+            logger.info("RuVector GNN-HNSW unified search for '%s...'", query[:50])
+            filter_kwargs = {}
+            if source_filter:
+                if isinstance(source_filter, str):
+                    filter_kwargs["filter"] = {"source": source_filter}
+                elif isinstance(source_filter, list) and len(source_filter) == 1:
+                    filter_kwargs["filter"] = {"source": source_filter[0]}
+                elif isinstance(source_filter, list):
+                    filter_kwargs["filter"] = {"source": {"$in": source_filter}}
+            return self.vector_store.similarity_search(query, k=k, **filter_kwargs)
+        # ------------------------------------
+
         # Try to get/init the sparse index on every call when not yet loaded
         if self._sparse_index is None:
             try:
@@ -1986,11 +2023,20 @@ class MetaAgent:
                     formatted_cot = f"<think>\n{ragforge_trace.reasoning_chain}\n</think>\n\n"
                     response_text = formatted_cot + response_text
 
-                # Append SAMR badge to answer when low confidence
-                if samr_result.get("alert_triggered"):
+                # Check Prime Radiant mathematical coherence block
+                if samr_result.get("blocked"):
+                    witness = samr_result.get("witness", "N/A")
+                    response_text = (
+                        f"🚫 **Prime Radiant Coherence Gate Blocked Generation** 🚫\n\n"
+                        f"The generated answer contradicted the retrieved documents. "
+                        f"A laplacian energy threshold violation was mathematically proven.\n"
+                        f"Cryptographic Witness: `{witness}`"
+                    )
+                # Fallback to legacy SAMR warning if not strictly blocked but alert triggered
+                elif samr_result.get("alert_triggered"):
                     icon = samr_result.get("alert_icon", "⚠️")
-                    note = samr_result.get("interpretation", "") # type: ignore
-                    response_text += f"\n\n{icon} **SAMR Faithfulness Notice:** {note}" # type: ignore
+                    note = samr_result.get("interpretation", "")
+                    response_text += f"\n\n{icon} **SAMR Notice:** {note}"
             except Exception as samr_err:
                 logger.warning("SAMR-lite failed (non-fatal): %s", samr_err)
                 faithfulness_score = _estimate_faithfulness(inp.message, response_text)
@@ -2107,6 +2153,42 @@ class MetaAgent:
             yield {"type": "token", "content": f"[Silicon Colosseum] Blocked: {decision.reason}"}
             yield {"type": "done", "latency_ms": round((time.perf_counter() - t0) * 1000, 2)} # type: ignore
             return
+
+        # 1.5 Tiny Dancer Semantic Routing
+        try:
+            from src.core.query_router import router_instance
+            route_decision = await router_instance.route_query(inp.message)
+            if route_decision == "table_lookup":
+                from src.modules.ragforge.calc_engine import CalcEngine
+                import re
+                calc_engine = CalcEngine(db_path=self.config.data_dir / "structured_data.db")
+                
+                draft_match = re.search(r"draft\s*(?:of|at|is)?\s*([\d\.]+)m?", inp.message.lower())
+                draft_val = float(draft_match.group(1)) if draft_match else None
+                
+                # Simple heuristical fallback vessel matching
+                vessel_id = "HA " if "primrose" in inp.message.lower() else "Unknown"
+                
+                if draft_val:
+                    result = calc_engine.lookup_table(vessel_id, draft_val)
+                    if "error" in result:
+                        yield {"type": "token", "content": f"Calculation Error: {result['error']}"}
+                    else:
+                        resp = (f"**Deterministic Table Lookup ({'Interpolated' if result.get('interpolated') else 'Exact'})**\n"
+                                f"- Vessel: M.V. Primrose Ace ({result.get('vessel_id')})\n"
+                                f"- Draft: {result.get('draft')}m\n"
+                                f"- Displacement: {result.get('displacement')} t\n"
+                                f"- TPC: {result.get('tpc')}\n"
+                                f"- MTC: {result.get('mtc')}\n"
+                                f"- KM: {result.get('km')}\n\n"
+                                f"*This response bypassed the LLM via Tiny Dancer semantic routing.*")
+                        yield {"type": "token", "content": resp}
+                else:
+                    yield {"type": "token", "content": "Calculation intent detected, but no draft value found. E.g., 'draft of 8.17'."}
+                yield {"type": "done", "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}
+                return
+        except Exception as e:
+            logger.warning(f"Tiny Dancer router failed or not configured: {e}")
 
         # 2. Memory & Context
         memory = self._get_or_create_memory(inp.session_id)

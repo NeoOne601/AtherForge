@@ -48,6 +48,16 @@ except ImportError:
     class SystemMessage:
         def __init__(self, content: str) -> None:
             self.content = content
+    
+    class PromptTemplate: # type: ignore
+        def __init__(self, template: str, input_variables: list[str]) -> None:
+            self.template = template
+            self.input_variables = input_variables
+        def format(self, **kwargs: Any) -> str:
+            formatted_template = self.template
+            for var in self.input_variables:
+                formatted_template = formatted_template.replace(f"{{{var}}}", str(kwargs.get(var, '')))
+            return formatted_template
 
 
 @runtime_checkable

@@ -26,6 +26,14 @@ class HistoryManager:
         self.settings = settings
         self._history_file = settings.data_dir / "training_history.json"
         self._history_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # [RUVECTOR PHASE 6 PLACEHOLDER] SONA LoRA Updater
+        # Replaces OPLoRA with Sparse Orthogonal N-dimensional Adaptation
+        try:
+            from ruvector_sona import SonaUpdater
+            self.sona_updater = SonaUpdater(str(settings.data_dir / "sona_weights.bin"))
+        except ImportError:
+            self.sona_updater = None
 
     def record(self, result: Any) -> None:
         """

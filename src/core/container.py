@@ -71,14 +71,30 @@ class Container:
             encode_kwargs={"normalize_embeddings": True},
         )
         self.register_service("embeddings", embeddings)
-        vector_store = Chroma(
-            persist_directory=str(self.settings.chroma_path), embedding_function=embeddings
-        )
-        self.register_service("vector_store", vector_store)
+        
+        # --- NEW: RuVector GNN-HNSW Unified Search ---
+        try:
+            from ruvector.langchain import RuVectorStore
+            logger.info("Initializing high-performance RuVector GNN-HNSW Store")
+            vector_store = RuVectorStore(
+                persist_directory=str(self.settings.data_dir / "ruvector"),
+                embedding_function=embeddings
+            )
+            self.register_service("vector_store", vector_store)
+            # RuVector handles hybrid inherently, we mock sparse_index
+            self.register_service("sparse_index", None)
+        except ImportError:
+            logger.info("RuVector bindings not found. Falling back to ChromaDB + SparseIndex.")
+            from langchain_chroma import Chroma
+            vector_store = Chroma(
+                persist_directory=str(self.settings.chroma_path), embedding_function=embeddings
+            )
+            self.register_service("vector_store", vector_store)
 
-        # Sparse Index
-        sparse_index = SparseIndex(db_path=self.settings.data_dir / "sparse_index.db")
-        self.register_service("sparse_index", sparse_index)
+            # Sparse Index
+            from src.modules.ragforge.sparse_index import SparseIndex
+            sparse_index = SparseIndex(db_path=self.settings.data_dir / "sparse_index.db")
+            self.register_service("sparse_index", sparse_index)
 
         # Document Registry
         document_registry = DocumentRegistry(db_path=self.settings.data_dir / "document_registry.db")

@@ -336,6 +336,24 @@ def load_with_docling(
                 max_chars = MAX_SECTION_CHARS
                 if item_label == "table":
                     chunk_type, max_chars = "table", MAX_TABLE_CHARS
+                    
+                    # --- NEW: STRUCTURED TABLE INGESTION ---
+                    try:
+                        from src.modules.ragforge.calc_engine import CalcEngine
+                        from src.config import get_settings
+                        settings = get_settings()
+                        calc_engine = CalcEngine(db_path=settings.data_dir / "structured_data.db")
+                        
+                        if hasattr(item, "export_to_dataframe"):
+                            df = item.export_to_dataframe()
+                            if not df.empty:
+                                # Simple vessel_id extraction from filename like "HA - 13 LOADING..."
+                                vessel_id = filepath.name.split(" - ")[0].strip() if " - " in filepath.name else filepath.stem
+                                calc_engine.ingest_hydrostatic_table(vessel_id, df)
+                    except Exception as e:
+                        logger.warning(f"Failed structured table ingestion for {filepath.name}: {e}")
+                    # ---------------------------------------
+                    
                 elif item_label in ("formula", "equation"):
                     chunk_type, max_chars = "equation", MAX_EQUATION_CHARS
                 elif item_label == "figure_caption":
@@ -1072,6 +1090,15 @@ def index_document(
                 sparse_idx.close()
         except Exception as fts_err:
             logger.warning("FTS5 batch indexing failed: %s", fts_err)
+
+        # [RUVECTOR PHASE 6 PLACEHOLDER] Cypher Graph Extraction
+        try:
+            from ruvector_cypher import GraphIngestor
+            graph_ingest = GraphIngestor(db_path=str(filepath.parent.parent / "graph.db"))
+            graph_ingest.build_relations(batch)
+            logger.info("Cypher Graph relationships extracted and stored for %d chunks", len(batch))
+        except ImportError:
+            pass
 
     # Load via smart router — returns (chunks, image_pages)
     result = load_document(filepath, chunk_callback=commit_chunks)
