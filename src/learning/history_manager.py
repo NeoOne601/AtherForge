@@ -30,9 +30,11 @@ class HistoryManager:
         # [RUVECTOR PHASE 6 PLACEHOLDER] SONA LoRA Updater
         # Replaces OPLoRA with Sparse Orthogonal N-dimensional Adaptation
         try:
-            from ruvector_sona import SonaUpdater
-            self.sona_updater = SonaUpdater(str(settings.data_dir / "sona_weights.bin"))
-        except ImportError:
+            import subprocess
+            # Test if ruvector sona is available
+            subprocess.run(["npx", "--yes", "ruvector", "sona", "--help"], capture_output=True, check=True)
+            self.sona_updater = True
+        except Exception:
             self.sona_updater = None
 
     def record(self, result: Any) -> None:

@@ -57,6 +57,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ── Local IPC / WebSockets ───────────────────────────────────────
 tokio-tungstenite = "0.23"
 
+# ── RuVector Native Integration ──────────────────────────────────
+ruvector-core = "*"
+ruvllm = { version = "^2.0", default-features = false, features = ["metal"] }
+prime-radiant = "*"
+rvf-runtime = "*"
+ruvector-sona = "*"
+
 [profile.release]
 # Aggressively optimize for size and speed on M1
 opt-level = 3

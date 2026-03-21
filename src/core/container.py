@@ -72,26 +72,28 @@ class Container:
         )
         self.register_service("embeddings", embeddings)
         
-        # --- NEW: RuVector GNN-HNSW Unified Search ---
+        # --- RuVector GNN-HNSW Unified Search (Authoritative) ---
+        # RuVectorStore wraps the native `npx ruvector rvf` CLI.
+        # It is the PRIMARY vector store for AetherForge.
+        from src.modules.ragforge.ruvector_store import RuVectorStore
         try:
-            from ruvector.langchain import RuVectorStore
-            logger.info("Initializing high-performance RuVector GNN-HNSW Store")
             vector_store = RuVectorStore(
                 persist_directory=str(self.settings.data_dir / "ruvector"),
-                embedding_function=embeddings
+                embedding_function=embeddings,
             )
             self.register_service("vector_store", vector_store)
-            # RuVector handles hybrid inherently, we mock sparse_index
-            self.register_service("sparse_index", None)
-        except ImportError:
-            logger.info("RuVector bindings not found. Falling back to ChromaDB + SparseIndex.")
+            self.register_service("sparse_index", None)  # RuVector handles hybrid inherently
+            logger.info("RuVector GNN-HNSW Store active (via CLI Bridge)")
+        except Exception as e:
+            logger.error(
+                "RuVector store init failed — degrading to ChromaDB (this should NOT happen in production)",
+                error=str(e),
+            )
             from langchain_chroma import Chroma
             vector_store = Chroma(
                 persist_directory=str(self.settings.chroma_path), embedding_function=embeddings
             )
             self.register_service("vector_store", vector_store)
-
-            # Sparse Index
             from src.modules.ragforge.sparse_index import SparseIndex
             sparse_index = SparseIndex(db_path=self.settings.data_dir / "sparse_index.db")
             self.register_service("sparse_index", sparse_index)
@@ -137,7 +139,7 @@ class Container:
         document_intelligence = DocumentIntelligenceService(
             settings=self.settings,
             vector_store=vector_store,
-            sparse_index=sparse_index,
+            sparse_index=self.get_service("sparse_index"),
             document_registry=document_registry,
             selected_vlm_id_getter=lambda: app_state.selected_vlm_id,
         )

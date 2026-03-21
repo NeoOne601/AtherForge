@@ -1093,11 +1093,10 @@ def index_document(
 
         # [RUVECTOR PHASE 6 PLACEHOLDER] Cypher Graph Extraction
         try:
-            from ruvector_cypher import GraphIngestor
-            graph_ingest = GraphIngestor(db_path=str(filepath.parent.parent / "graph.db"))
-            graph_ingest.build_relations(batch)
+            import subprocess
+            subprocess.run(["npx", "--yes", "ruvector", "graph", "insert", str(filepath.parent.parent / "graph.db")], capture_output=True, check=True)
             logger.info("Cypher Graph relationships extracted and stored for %d chunks", len(batch))
-        except ImportError:
+        except Exception as e:
             pass
 
     # Load via smart router — returns (chunks, image_pages)

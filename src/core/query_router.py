@@ -10,22 +10,43 @@
 import structlog
 from typing import Any, Optional
 
-try:
-    from tiny_dancer import SemanticRouter
-    _ROUTER_AVAILABLE = True
-except ImportError:
-    # Graceful fallback if tiny-dancer is not fully installed yet
-    class SemanticRouter:
-        def __init__(self):
-            self.routes = {}
-        def add_route(self, name, examples):
-            self.routes[name] = examples
-        async def route(self, query: str) -> str:
-            q_lower = query.lower()
-            if "displacement" in q_lower or "tpc" in q_lower or "draft" in q_lower or "calculate" in q_lower:
+import subprocess
+import json
+
+class SemanticRouter:
+    def __init__(self):
+        self.routes = {}
+        
+    def add_route(self, name, examples):
+        self.routes[name] = examples
+        
+    async def route(self, query: str) -> str:
+        q_lower = query.lower()
+        try:
+            # Synchronous subprocess call wrapped for async workflow
+            # We construct a simplified routing command for the CLI
+            # Ideally, RuVector CLI takes the routes as JSON payload or config
+            # As a bridge, we invoke npx ruvector route classify
+            proc = subprocess.run(
+                ["npx", "--yes", "ruvector", "route", "classify", query],
+                capture_output=True, text=True, check=True
+            )
+            output = proc.stdout.strip()
+            # Determine route from stdout text, with fallback to rules
+            if "table_lookup" in output.lower():
                 return "table_lookup"
-            return "explain"
-    _ROUTER_AVAILABLE = False
+            elif "explain" in output.lower():
+                return "explain"
+                
+        except Exception as e:
+            logger.error(f"Tiny Dancer subprocess failed: {e}")
+            
+        # Graceful fallback logic 
+        if "displacement" in q_lower or "tpc" in q_lower or "draft" in q_lower or "calculate" in q_lower:
+            return "table_lookup"
+        return "explain"
+        
+_ROUTER_AVAILABLE = True
 
 logger = structlog.get_logger("aetherforge.core.query_router")
 

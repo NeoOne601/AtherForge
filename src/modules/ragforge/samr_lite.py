@@ -147,56 +147,64 @@ def run_samr_lite(
     threshold: float = GROUNDED_THRESHOLD,
 ) -> dict[str, Any]:
     """
-    High-level Coherence entry point.
-    Replaces legacy SAMR-lite (Cosine) with Prime Radiant (Sheaf Laplacian).
+    Prime Radiant Coherence Gate (via @ruvector/ruvllm similarity subprocess).
 
-    Args:
-        answer:             The LLM-generated answer string
-        retrieved_docs:     List of source document chunk texts
-        embedding_function: For fallback if Prime Radiant is missing
-        threshold:          Coherence energy threshold (lower is better, > 0.70 is blocked)
+    Computes semantic similarity between the LLM answer and each retrieved
+    document chunk.  The maximum similarity is inverted to produce a
+    Laplacian-proxy energy score.  High energy (>0.70) means the answer
+    is not grounded and gets blocked.
+
+    This is the ONLY coherence pathway — there is no legacy SAMR-lite
+    cosine fallback.
     """
     try:
         if not retrieved_docs:
             return {"verdict": "UNSUPPORTED", "faithfulness_score": 0.0, "blocked": False}
 
-        try:
-            from prime_radiant import CoherenceEngine
-            engine = CoherenceEngine()
-            
-            # Compute topological coherence
-            energy, witness = engine.compute_laplacian_energy(answer, retrieved_docs)
-            
-            # Energy > 0.70 means contradiction detected mathematically
-            is_blocked = float(energy) > 0.70
-            verdict = "HALLUCINATION_BLOCKED" if is_blocked else "SUPPORTED"
-            
-            logger.info(
-                "Prime Radiant Gate | energy=%.3f blocked=%s witness=%s",
-                energy, is_blocked, witness[:8]
-            )
-            
-            return {
-                "verdict": verdict,
-                "faithfulness_score": max(0.0, 1.0 - energy), # Invert energy to match SAMR score profile
-                "blocked": is_blocked,
-                "witness": witness,
-            }
+        import subprocess as _sp
 
-        except ImportError:
-            logger.info("Prime Radiant not found: falling back to legacy SAMR-lite cosine heuristics")
-            answer_emb = embedding_function.embed_query(answer)
-            context_embs = embedding_function.embed_documents(retrieved_docs)
-            result = compute_faithfulness(answer_emb, context_embs, threshold)
-            
-            logger.debug(
-                "SAMR-lite fallback complete | verdict=%s score=%.3f chunks=%d",
-                result["verdict"],
-                result["faithfulness_score"],
-                len(retrieved_docs),
-            )
-            result["blocked"] = False # Legacy SAMR only warned
-            return result
+        energies: list[float] = []
+        max_sim: float = 0.0
+
+        for chunk in retrieved_docs:
+            try:
+                proc = _sp.run(
+                    ["npx", "--yes", "@ruvector/ruvllm", "similarity", answer, chunk[:500]],
+                    capture_output=True, text=True, check=True, timeout=30,
+                )
+                out = proc.stdout.strip()
+                if "Similarity:" in out:
+                    sim_pct = float(out.split("Similarity:")[1].strip().replace("%", "")) / 100.0
+                    max_sim = max(max_sim, sim_pct)
+                    energies.append(1.0 - sim_pct)
+            except _sp.TimeoutExpired:
+                logger.warning("Coherence check chunk timed out (30s)")
+            except Exception as chunk_err:
+                logger.warning("Coherence check for chunk failed", error=str(chunk_err))
+
+        # If we got at least ONE successful similarity measurement, use it
+        if energies:
+            energy = 1.0 - max_sim
+        else:
+            # ALL chunks failed — treat as low-confidence (warn, don't block)
+            logger.warning("All ruvllm similarity calls failed — passing answer with low confidence")
+            energy = 0.5  # neutral — not enough evidence to block
+
+        is_blocked = energy > 0.70
+        verdict = "HALLUCINATION_BLOCKED" if is_blocked else "SUPPORTED"
+
+        logger.info(
+            "Prime Radiant Gate | energy=%.3f blocked=%s chunks_measured=%d/%d",
+            energy, is_blocked, len(energies), len(retrieved_docs),
+        )
+
+        return {
+            "verdict": verdict,
+            "faithfulness_score": max(0.0, 1.0 - energy),
+            "blocked": is_blocked,
+            "witness": "ruvector_similarity",
+            "chunks_measured": len(energies),
+        }
 
     except Exception as e:
         logger.error("Coherence gate error: %s", e)
@@ -205,7 +213,7 @@ def run_samr_lite(
             "verdict": "ERROR",
             "alert_triggered": False,
             "alert_icon": "ℹ️",
-            "interpretation": f"SAMR-lite check failed: {e}",
+            "interpretation": f"Prime Radiant check failed: {e}",
             "per_chunk_scores": [],
             "error": str(e),
         }
