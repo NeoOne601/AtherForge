@@ -17,7 +17,7 @@ std = ["sha3/std"]
 ed25519 = ["dep:ed25519-dalek"]
 
 [dependencies]
-rvf-types = { version = "0.2.0", path = "../rvf-types" }
+rvf-types = { version = "0.2.0" }
 sha3 = { version = "0.10", default-features = false }
 ed25519-dalek = { version = "2", features = ["rand_core"], optional = true }
 
