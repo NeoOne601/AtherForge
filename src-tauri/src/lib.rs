@@ -5,7 +5,7 @@ use ruvllm_bridge::{init_llm, llm_generate, llm_health};
 pub fn run() {
     // Initialize LLM state (graceful fallback if model not found)
     let model_path = std::env::var("QWEN_MODEL_PATH")
-        .unwrap_or_else(|_| "./models/qwen2.5-7b-instruct-q4_k_m.gguf".to_string());
+        .unwrap_or_else(|_| "/Volumes/Apple/AI Model/qwen2.5-7b-instruct-q4_k_m.gguf".to_string());
     let llm_state = init_llm(&model_path);
 
     tauri::Builder::default()
