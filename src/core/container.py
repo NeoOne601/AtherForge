@@ -42,7 +42,6 @@ class Container:
         """Initialize all core services and wire them together."""
         import uuid
 
-        from langchain_chroma import Chroma
         from langchain_huggingface import HuggingFaceEmbeddings
 
         from src.guardrails.silicon_colosseum import SiliconColosseum
@@ -73,32 +72,20 @@ class Container:
         self.register_service("embeddings", embeddings)
         
         # --- Vector Store Selection ---
-        # ChromaDB is the PRIMARY store — all indexed documents live here.
-        # RuVectorStore is available as a secondary for future migration.
-        # Data integrity: ChromaDB has 339MB of indexed chunks; RuVector .rvf
-        # needs re-ingestion before it can become primary.
-        from langchain_chroma import Chroma
-        vector_store = Chroma(
-            persist_directory=str(self.settings.chroma_path), embedding_function=embeddings
+        # RuVectorStore is now the PRIMARY store (Option B: Full RuVector).
+        # The user cleared LiveFolder — all documents will be re-extracted
+        # and re-indexed through RuVector's GNN-HNSW pipeline.
+        from src.modules.ragforge.ruvector_store import RuVectorStore
+        vector_store = RuVectorStore(
+            persist_directory=str(self.settings.data_dir / "ruvector"),
+            embedding_function=embeddings,
         )
         self.register_service("vector_store", vector_store)
-        logger.info("ChromaDB vector store active (primary — existing indexed data)")
+        logger.info("RuVectorStore active (primary — Option B: Full RuVector architecture)")
 
         from src.modules.ragforge.sparse_index import SparseIndex
         sparse_index = SparseIndex(db_path=self.settings.data_dir / "sparse_index.db")
         self.register_service("sparse_index", sparse_index)
-
-        # Keep RuVectorStore available for future use
-        try:
-            from src.modules.ragforge.ruvector_store import RuVectorStore
-            self._ruvector = RuVectorStore(
-                persist_directory=str(self.settings.data_dir / "ruvector"),
-                embedding_function=embeddings,
-            )
-            logger.info("RuVector secondary store available (for future migration)")
-        except Exception as e:
-            self._ruvector = None
-            logger.info("RuVector secondary not available: %s", e)
 
         # Document Registry
         document_registry = DocumentRegistry(db_path=self.settings.data_dir / "document_registry.db")

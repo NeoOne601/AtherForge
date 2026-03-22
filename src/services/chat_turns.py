@@ -184,16 +184,19 @@ async def execute_turn(
         )
     )
     latency_ms = round(float((time.perf_counter() - t0) * 1000), 2)
-    _reasoning, answer_text = split_reasoning_trace(result.response)
+    actual_reasoning, answer_text = split_reasoning_trace(result.response)
     answer_text = answer_text or result.response
     citations = normalize_citations(result.citations)
-    reasoning_summary = build_reasoning_summary(
+    synthetic_summary = build_reasoning_summary(
         module=module,
         message=message,
         answer_text=answer_text,
         tool_calls=result.tool_calls,
         citations=citations,
     )
+    # Use the actual LLM reasoning chain (from <think> tags) for the ThinkingBlock,
+    # falling back to the synthetic summary if no model reasoning was captured.
+    reasoning_for_display = actual_reasoning or synthetic_summary
     suggestions = generate_suggestions(
         module=module,
         answer_text=answer_text,
@@ -209,8 +212,8 @@ async def execute_turn(
         policy_decisions=result.policy_decisions,
         causal_graph=result.causal_graph,
         faithfulness_score=result.faithfulness_score,
-        reasoning_summary=reasoning_summary,
-        reasoning_trace=reasoning_summary,
+        reasoning_summary=reasoning_for_display,
+        reasoning_trace=synthetic_summary,
         answer_text=answer_text,
         citations=citations,
         attachments=result.attachments,

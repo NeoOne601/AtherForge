@@ -281,6 +281,35 @@ class DocumentRegistry:
             updated_at=float(row["updated_at"]),
         )
 
+    def purge_missing_files(self, *search_dirs: Path) -> int:
+        """Remove registry entries whose source files no longer exist on disk.
+
+        Args:
+            *search_dirs: Directories to search for source files.
+                          Typically LiveFolder and data/uploads.
+
+        Returns:
+            Number of records purged.
+        """
+        all_records = self.list_documents(limit=9999)
+        purged = 0
+        for record in all_records:
+            found = False
+            for d in search_dirs:
+                if (d / record.source).exists():
+                    found = True
+                    break
+            if not found:
+                with self._write_lock:
+                    conn = self._get_conn()
+                    conn.execute(
+                        "DELETE FROM documents WHERE document_id = ?",
+                        (record.document_id,),
+                    )
+                    conn.commit()
+                purged += 1
+        return purged
+
     def close(self) -> None:
         conn = self._conn
         if conn is not None:

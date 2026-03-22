@@ -111,7 +111,7 @@ class SparseIndex:
     def add_documents(self, chunks: list[Document]) -> int:
         """
         Add document chunks to the FTS5 index.
-        Should be called alongside ChromaDB's add_documents().
+        Should be called alongside the vector store's add_documents().
         """
         if not chunks:
             return 0

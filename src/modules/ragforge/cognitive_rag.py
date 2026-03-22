@@ -466,6 +466,21 @@ class CognitiveRAG:
             except Exception as e:
                 logger.warning("Multi-path search failed for sub-query '%s...': %s", str(q)[:50], e)
 
+        # ── Defense-in-depth: hard post-filter by source ───────────
+        # Ensures NO chunk from an unselected document leaks through,
+        # regardless of how the upstream dense/sparse search behaved.
+        if source_filter:
+            allowed: set[str] = (
+                {source_filter} if isinstance(source_filter, str) else set(source_filter)
+            )
+            before_count = len(all_docs)
+            all_docs = [d for d in all_docs if d.metadata.get("source") in allowed]
+            if len(all_docs) < before_count:
+                logger.info(
+                    "Source post-filter: kept %d/%d docs (allowed=%s)",
+                    len(all_docs), before_count, allowed,
+                )
+
         return all_docs
 
     # ─────────────────────────────────────────────────────────────

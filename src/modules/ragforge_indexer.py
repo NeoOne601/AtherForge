@@ -14,7 +14,7 @@
 #
 #   Phase 3 — BGE-M3 Embedding
 #     • 8192-token limit (vs old 512) — full sections fit in one vector
-#     • Stored in ChromaDB with rich metadata for citation generation
+#     • Stored in RuVector GNN-HNSW with rich metadata for citation generation
 #
 # 100% offline. No internet required. Air-gap safe.
 # ─────────────────────────────────────────────────────────────────
@@ -1008,7 +1008,7 @@ def load_document(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Phase 2 + 3: Index into ChromaDB
+# Phase 2 + 3: Index into Vector Store (RuVector GNN-HNSW)
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -1025,7 +1025,7 @@ def index_document(
          and the file's mtime hasn't changed since last index (boot-sweep fix).
       2. Delete existing chunks for this source (deduplication guard)
       3. Load + semantically chunk (Docling text extraction → OCR fallback)
-      4. Embed with all-MiniLM-L6-v2 and store in ChromaDB
+      4. Embed with all-MiniLM-L6-v2 and store in RuVector
       5. Write to FTS5 sparse index (uses shared AppState singleton when provided)
       6. Return image_pages for async VLM processing
     """
@@ -1064,17 +1064,17 @@ def index_document(
     # ── Step 1: Deduplicate — delete existing chunks for this source ──
     # This prevents chunk accumulation when a user re-uploads the same document.
     try:
-        # ChromaDB dedup: delete by source metadata
+        # Vector store dedup: delete existing chunks by source metadata
         existing = vector_store.get(where={"source": source_name})
         if existing and existing.get("ids"):
             vector_store.delete(ids=existing["ids"])
             logger.info(
-                "Dedup: removed %d existing ChromaDB chunks for '%s'",
+                "Dedup: removed %d existing vector store chunks for '%s'",
                 len(existing["ids"]),
                 source_name,
             )
     except Exception as dedup_err:
-        logger.warning("ChromaDB dedup failed (non-fatal): %s", dedup_err)
+        logger.warning("Vector store dedup failed (non-fatal): %s", dedup_err)
 
     if sparse_index is not None:
         try:
@@ -1099,7 +1099,7 @@ def index_document(
             chunk.metadata["chunk_id"] = str(uuid.uuid4())
             # parser is already in metadata from load_with_docling
 
-        # Embed and store in ChromaDB
+        # Embed and store in vector store (RuVector)
         logger.info("Committing %d chunks to vector store...", len(batch))
         vector_store.add_documents(batch)
 

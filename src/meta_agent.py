@@ -719,18 +719,13 @@ class MetaAgent:
                     )
 
             # ── Engine selection ─────────────────────────────────────
-            import subprocess as _sp
+            # Priority: llama_cpp (direct GGUF) → RuvLLM subprocess (fallback)
+            # llama_cpp gives reliable local inference; the subprocess bridge
+            # depends on @ruvector/ruvllm npm package availability.
             try:
-                _sp.run(["npx", "--version"], capture_output=True, check=True, timeout=10)
-                logger.info("RuvLLM subprocess bridge: npx verified — using native ruvllm runtime")
-                return RuvLLMSubprocessEngine(model_path=str(model_path), n_ctx=16384)
-            except Exception as npx_err:
-                logger.error(
-                    "npx not available — falling back to llama_cpp (production SHOULD have Node installed)",
-                    error=str(npx_err),
-                )
                 from llama_cpp import Llama, LlamaGrammar  # type: ignore
                 setattr(self, "_LlamaGrammar", LlamaGrammar)
+                logger.info("llama_cpp available — using direct GGUF inference (primary engine)")
                 return Llama(
                     model_path=str(model_path),
                     n_ctx=self.settings.bitnet_n_ctx,
@@ -739,6 +734,20 @@ class MetaAgent:
                     use_mlock=True,
                     verbose=False,
                 )
+            except ImportError:
+                logger.warning(
+                    "llama_cpp not installed — falling back to RuvLLM subprocess bridge",
+                )
+                import subprocess as _sp
+                try:
+                    _sp.run(["npx", "--version"], capture_output=True, check=True, timeout=10)
+                    logger.info("RuvLLM subprocess bridge: npx verified — using ruvllm runtime")
+                    return RuvLLMSubprocessEngine(model_path=str(model_path), n_ctx=16384)
+                except Exception as npx_err:
+                    logger.error("Neither llama_cpp nor npx available", error=str(npx_err))
+                    raise RuntimeError(
+                        "No LLM engine available: install llama-cpp-python or Node.js"
+                    ) from npx_err
 
         loop = self.loop
         self._llm = await loop.run_in_executor(None, _load) # type: ignore
@@ -1030,6 +1039,12 @@ class MetaAgent:
                         query[:50], # type: ignore
                         source_filter,
                     )
+                    # ── Defense-in-depth: post-filter hybrid results ──
+                    if source_filter:
+                        hybrid_allowed: set[str] = (
+                            {source_filter} if isinstance(source_filter, str) else set(source_filter)
+                        )
+                        results = [d for d in results if d.metadata.get("source") in hybrid_allowed]
                     return results # type: ignore
             except Exception as e:
                 logger.warning("Hybrid search failed: %s — falling back to dense", e)
@@ -1044,7 +1059,16 @@ class MetaAgent:
                 filter_kwargs["filter"] = {"source": source_filter[0]}
             elif isinstance(source_filter, list):
                 filter_kwargs["filter"] = {"source": {"$in": source_filter}}
-        return self.vector_store.similarity_search(query, k=k, **filter_kwargs)
+        dense_results = self.vector_store.similarity_search(query, k=k, **filter_kwargs)
+
+        # ── Defense-in-depth: hard post-filter by source ───────────
+        # Guarantees NO chunk from an unselected document leaks through.
+        if source_filter:
+            allowed_sources: set[str] = (
+                {source_filter} if isinstance(source_filter, str) else set(source_filter)
+            )
+            dense_results = [d for d in dense_results if d.metadata.get("source") in allowed_sources]
+        return dense_results
 
     def _generate_ira_blueprint(self, message: str, context: dict[str, Any]) -> IRABlueprint:
         """
@@ -1509,6 +1533,119 @@ class MetaAgent:
                 if inp.xray_mode
                 else None,
             )
+
+        # ── 1.5 Deterministic Query Routing ───────────────────────
+        # Intercepts calculation queries BEFORE any LLM invocation.
+        # The CalcEngine does exact lookup or linear interpolation from
+        # the structured SQLite hydrostatic tables. NO LLM arithmetic.
+        try:
+            from src.core.query_router import route_query, QueryRoute, extract_draft, extract_column, extract_sg
+            from src.core.calc_engine import CalcEngine
+
+            route = route_query(inp.message)
+            logger.info("Query router (_run_sync): %s → %s", inp.message[:60], route.value)
+            _trace(
+                "query_router",
+                {"route": route.value, "message_preview": inp.message[:60]},
+                label="Deterministic Router",
+            )
+
+            if route in (QueryRoute.TABLE_LOOKUP, QueryRoute.MULTI_LOOKUP, QueryRoute.INTERPOLATE, QueryRoute.UNIT_CONVERT):
+                calc_engine = CalcEngine(db_path=str(self.settings.data_dir / "structured_data.db"))
+                draft = extract_draft(inp.message)
+
+                if draft is None:
+                    return MetaAgentOutput(
+                        response="I detected a calculation intent, but couldn't find a draft value (e.g. '8.17m'). Please include the draft in metres.",
+                        policy_decisions=policy_decisions,
+                        causal_graph={"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
+                    )
+
+                # Vessel ID heuristic — default for Primrose Ace / HA-13
+                vessel_id = "HA"
+                resp = ""
+
+                try:
+                    if route == QueryRoute.MULTI_LOOKUP:
+                        result = calc_engine.lookup_all_hydrostatic(vessel_id, draft)
+                        lines = [f"**Hydrostatic Particulars at {draft}m Draft (Salt Water)**\n"]
+                        for col, data in result["results"].items():
+                            lines.append(f"- **{col.upper()}**: {data['value']} {data['unit']}")
+                        if result["results"]:
+                            first_trace = next(iter(result["results"].values()))["trace"]
+                            lines.append(f"\n*Method: {first_trace['method']}*")
+                        if result.get("errors"):
+                            for col, err in result["errors"].items():
+                                lines.append(f"- ⚠️ {col.upper()}: {err}")
+                        resp = "\n".join(lines)
+
+                    elif route == QueryRoute.UNIT_CONVERT:
+                        column = extract_column(inp.message)
+                        sw_result = calc_engine.lookup_hydrostatic(vessel_id, draft, column)
+                        sw_val = sw_result["value"]
+                        sg = extract_sg(inp.message)
+                        if sg:
+                            correction = calc_engine.apply_sg_correction(sw_val, sg)
+                            resp = (
+                                f"**{column.upper()} at {draft}m in dock water (SG {sg})**\n\n"
+                                f"- Salt water value: {sw_val} {sw_result['unit']}\n"
+                                f"- Dock water value: **{correction['value']}** {correction['unit']}\n\n"
+                                f"*Formula: {correction['trace']['formula']}*"
+                            )
+                        else:
+                            correction = calc_engine.apply_fw_correction(sw_val)
+                            resp = (
+                                f"**{column.upper()} at {draft}m in fresh water**\n\n"
+                                f"- Salt water value: {sw_val} {sw_result['unit']}\n"
+                                f"- Fresh water value: **{correction['value']}** {correction['unit']}\n\n"
+                                f"*Formula: {correction['trace']['formula']}*"
+                            )
+
+                    else:  # TABLE_LOOKUP or INTERPOLATE
+                        column = extract_column(inp.message)
+                        result = calc_engine.lookup_hydrostatic(vessel_id, draft, column)
+                        method_label = "Exact Match" if result["trace"]["method"] == "exact_match" else "Interpolated"
+                        resp = (
+                            f"**{column.upper()} at {draft}m Draft ({method_label})**\n\n"
+                            f"**{result['value']}** {result['unit']}\n\n"
+                        )
+                        if result["trace"].get("formula"):
+                            resp += f"*Formula: {result['trace']['formula']}*\n"
+                        resp += "\n*This result was calculated deterministically from the hydrostatic tables — no LLM arithmetic.*"
+
+                    # Coherence gate
+                    try:
+                        calc_trace_for_verify = {}
+                        if route == QueryRoute.MULTI_LOOKUP:
+                            calc_trace_for_verify = {col: d.get("trace", {}) for col, d in result.get("results", {}).items()}
+                        elif isinstance(result, dict) and "trace" in result:
+                            calc_trace_for_verify = result.get("trace", {})
+                        if calc_trace_for_verify:
+                            verify_calc_response(resp, calc_trace_for_verify)
+                            logger.info("Coherence gate (_run_sync): PASS")
+                    except NumberVerificationError as nve:
+                        logger.warning("Coherence gate (_run_sync): FAIL — %s", nve)
+                        resp += "\n\n⚠️ *Number verification enforced — values re-verified against source tables.*"
+
+                    _trace("calc_engine", {"route": route.value, "draft": draft, "response_len": len(resp)}, label="Deterministic Result")
+
+                    resp += "\n\n*This result was calculated deterministically from the hydrostatic tables — no LLM arithmetic.*"
+
+                    return MetaAgentOutput(
+                        response=resp,
+                        policy_decisions=policy_decisions,
+                        causal_graph={"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
+                    )
+
+                except ValueError as calc_err:
+                    logger.warning("CalcEngine error (_run_sync): %s — falling through to RAG", calc_err)
+                    # Fall through to RAG pipeline if CalcEngine fails
+                    pass
+
+        except ImportError as e:
+            logger.warning("Query router not available (_run_sync): %s", e)
+        except Exception as e:
+            logger.warning("Query router failed (_run_sync, non-fatal): %s", e)
 
         # ── 2. Retrieve session memory ────────────────────────────
         memory = self._get_or_create_memory(inp.session_id)

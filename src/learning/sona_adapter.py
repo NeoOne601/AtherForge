@@ -50,7 +50,7 @@ class SONAAdapter:
             self._initialized = True
             logger.info("SONA adapter initialised")
         except ImportError:
-            logger.warning(
+            logger.info(
                 "ruvector-sona not installed — SONA learning disabled, "
                 "will use OPLoRA nightly batch only"
             )

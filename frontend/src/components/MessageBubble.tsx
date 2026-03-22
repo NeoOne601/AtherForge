@@ -91,8 +91,8 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onS
             <div className={`avatar ${isUser ? "user-av" : "ai"}`}>
                 {isUser ? "You" : "Æ"}
             </div>
-            <div className={`bubble ${isUser ? "user-bubble" : "ai"}`}>
-                {/* Thinking section (collapsible ThinkingBlock) */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxWidth: "85%" }}>
+                {/* Thinking section — ABOVE the bubble, as a separate collapsible block */}
                 {!isUser && thinking && showThinking && (
                     <ThinkingBlock
                         content={thinking}
@@ -100,7 +100,7 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onS
                         isStreaming={msg.isThinkingStreaming}
                     />
                 )}
-
+            <div className={`bubble ${isUser ? "user-bubble" : "ai"}`}>
                 {/* Main answer */}
                 {isUser ? (
                     <div className="message-text">{msg.content}</div>
@@ -226,6 +226,7 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onS
                         )}
                     </div>
                 )}
+            </div>
             </div>
         </div>
     );

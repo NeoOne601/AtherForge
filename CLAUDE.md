@@ -4,189 +4,272 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AetherForge is a Sovereign Intelligence OS that implements a Closed-Loop Perpetual Learning architecture with air-gapped security. It bridges high-performance LLMs with edge-device privacy requirements using local inference and continual learning without catastrophic forgetting.
+AetherForge is a **Sovereign Intelligence OS** — a desktop-native AI system that learns, reasons, and calculates entirely on-device. It implements a Closed-Loop Perpetual Learning architecture with air-gapped security, bridging high-performance LLMs with edge-device privacy requirements.
 
-Key innovations:
-- OPLoRA + SONA: Perpetual learning with 3-tier real-time adaptation and nightly consolidation
-- CognitiveRAG™: 7-stage reasoning pipeline with self-verification
-- Silicon Colosseum: Deterministic policy engine using OPA/Rego
-- Query Router + CalcEngine: Deterministic calculation for numeric queries (LLMs explain; they never calculate)
-- ruvllm: Native Rust GGUF runtime (Qwen2.5-7B-Instruct) via Tauri commands
-- Coherence Gate: Post-generation number verification against calc traces
+### Core Design Principles
+1. **"LLMs explain; they never calculate."** All numeric queries are routed to the deterministic CalcEngine before any LLM call.
+2. **Glass-Box Reasoning.** Every decision exposes full `<think>` reasoning traces, auditable causal graphs, and SAMR-lite faithfulness scores.
+3. **Perpetual Learning.** OPLoRA (nightly) + SONA (per-request) ensure the system learns without catastrophic forgetting.
+4. **Air-Gapped Security.** Zero external API calls. SQLCipher encryption. No telemetry.
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|:------|:-----------|
+| Desktop Shell | Tauri 2.1 (Rust) |
+| Frontend | React 18 + TypeScript 5.5 + Vite |
+| Backend | Python 3.12 + FastAPI + Uvicorn |
+| Orchestration | LangGraph + LangChain Core |
+| LLM Inference | ruvllm (Rust GGUF) + llama-cpp-python (Python fallback) |
+| Primary Vector Store | **RuVector GNN-HNSW** (NPM CLI → .rvf binary files) |
+| Sparse Search | SQLite FTS5 (BM25) |
+| Structured Data | SQLite (hydrostatic tables for CalcEngine) |
+| Document Processing | IBM Docling + PyMuPDF + VLM (SmolVLM / Florence-2) |
+| Embeddings | all-MiniLM-L6-v2 (384-dim, cosine similarity) |
+| Learning | OPLoRA (SVD orthogonal projection) + SONA 3-tier |
+| Guardrails | Silicon Colosseum (OPA/Rego + FSM) |
+| Encryption | SQLCipher (AES-256) |
+
+---
 
 ## Repository Structure
 
 ```
 AtherForge/
-├── src/              # Python backend (FastAPI)
-│   ├── core/         # DI Container, Orchestrator, Grammar
-│   ├── guardrails/   # Silicon Colosseum (OPA policies)
-│   ├── learning/     # OPLoRA, Replay Buffer, History Manager
-│   ├── modules/      # Plugin modules (RAGForge, StreamSync, etc.)
-│   ├── routers/      # FastAPI route handlers
-│   └── main.py       # Application entry point
-├── frontend/         # React/Tauri desktop UI
-├── data/             # Persistent storage (encrypted)
-├── models/           # Ternary BitNet weights (GGUF)
-├── tests/            # Unit and integration tests
-└── Test_related/     # Additional test resources
+├── src/                           # Python backend (FastAPI)
+│   ├── core/                      # DI Container, CalcEngine, QueryRouter, Grammar
+│   │   ├── container.py           # Central dependency injection & service lifecycle
+│   │   ├── calc_engine.py         # Deterministic table interpolation (no LLM math)
+│   │   └── query_router.py        # Intent classifier (fires BEFORE any LLM call)
+│   ├── guardrails/                # Silicon Colosseum
+│   │   ├── silicon_colosseum.py   # OPA/Rego policy enforcement
+│   │   └── coherence_gate.py     # Post-generation number trace verification
+│   ├── learning/                  # Continual Learning
+│   │   ├── oplora_trainer.py      # Orthogonal Projection LoRA (nightly batch)
+│   │   ├── sona_adapter.py        # SONA 3-tier real-time learning (optional)
+│   │   ├── replay_buffer.py       # Encrypted interaction storage (Parquet/Fernet)
+│   │   ├── history_manager.py     # Conversation history management
+│   │   └── evolution.py           # AetherResearcher iterative experiment loop
+│   ├── modules/                   # Plugin Modules
+│   │   ├── ragforge/              # CognitiveRAG™ pipeline
+│   │   │   ├── ruvector_store.py  # RuVector CLI bridge (LangChain VectorStore)
+│   │   │   ├── cognitive_rag.py   # 7-stage reasoning pipeline
+│   │   │   ├── sparse_index.py    # SQLite FTS5 BM25 search
+│   │   │   ├── vlm_enrich.py      # VLM visual extraction for scanned PDFs
+│   │   │   └── table_extractor.py # Tables → SQLite at ingestion time
+│   │   ├── ragforge_indexer.py    # Precision Ingestion™ pipeline
+│   │   ├── document_registry.py   # SQLite doc metadata + boot-sweep purge
+│   │   ├── session_store.py       # SQLCipher encrypted sessions
+│   │   ├── export_engine.py       # PDF/Markdown export
+│   │   ├── analytics/             # Usage statistics module
+│   │   ├── streamsync/            # LiveFolder watcher + RSS feeder
+│   │   ├── sync/                  # P2P encrypted sync (SyncManager)
+│   │   ├── tunelab/               # Learning monitor
+│   │   ├── localbuddy/            # Local assistant
+│   │   └── watchtower/            # System observability
+│   ├── routers/                   # FastAPI route handlers
+│   ├── services/                  # Business logic
+│   │   ├── chat_turns.py          # Turn execution, reasoning summary, suggestions
+│   │   └── document_intelligence.py # Document upload, VLM processing manager
+│   ├── meta_agent.py              # LangGraph Supervisor (the brain — 2800+ lines)
+│   ├── chat_contract.py           # Shared chat protocol utilities
+│   ├── config.py                  # AetherForgeSettings (Pydantic)
+│   └── main.py                    # Entry point + CLI
+├── frontend/                      # React/Vite/TypeScript HUD
+│   └── src/components/            # ThinkingBlock, X-Ray, TuneLab, DocumentPanel
+├── src-tauri/src/                 # Rust Tauri shell
+│   ├── ruvllm_bridge.rs           # Native GGUF inference via Tauri commands
+│   └── lib.rs                     # Tauri plugin registration
+├── data/                          # Persistent Storage (encrypted)
+│   ├── LiveFolder/                # Drop files here for auto-ingestion
+│   ├── uploads/                   # REST API uploaded files
+│   ├── ruvector/                  # .rvf vector database files
+│   ├── document_registry.db       # File-level metadata (SQLite)
+│   ├── sparse_index.db            # FTS5 BM25 index (SQLite)
+│   ├── structured_data.db         # Hydrostatic tables (SQLite)
+│   └── sessions.db                # Encrypted chat sessions (SQLCipher)
+├── models/                        # LLM weights
+└── tests/                         # Unit and integration tests
 ```
+
+---
 
 ## Development Commands
 
 ### Installation
 ```bash
-# One-time setup (installs all deps, creates venv, downloads model)
 chmod +x install.sh && ./install.sh
 ```
 
 ### Running Development Server
 ```bash
-# Start full dev stack (backend + frontend + Tauri)
+# Full stack (backend + frontend + Tauri)
 ./run_dev.sh
 
-# Start only backend
-./run_dev.sh --backend-only
+# Backend only
+.venv/bin/python -m uvicorn src.main:app --host 127.0.0.1 --port 8765 --reload
 
-# Start only frontend
-./run_dev.sh --frontend-only
+# Frontend only (web)
+npm run dev
 
-# Start without Docker services
-./run_dev.sh --no-docker
+# Desktop app (Tauri)
+npm run tauri:dev
 ```
 
 ### Testing
 ```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/test_chat_contract.py
-
-# Run tests with coverage
-pytest --cov=src
-
-# Run specific test function
-pytest tests/test_chat_contract.py::test_split_reasoning_trace_complete_block
-
-# Run tests in verbose mode
-pytest -v
-
-# Run tests with output capturing disabled
-pytest -s
-
-# Run tests matching a pattern
-pytest -k "test_reasoning"
+pytest                                          # All tests
+pytest tests/test_chat_contract.py              # Specific file
+pytest --cov=src                                # With coverage
+pytest -v -k "test_reasoning"                   # Pattern match
 ```
 
-### Linting and Formatting
+### Linting & Formatting
 ```bash
-# Run linter
-ruff check src
-
-# Auto-fix lint issues
-ruff check --fix src
-
-# Type checking
-mypy src
-
-# Format code
-black src
+ruff check src           # Lint
+ruff check --fix src     # Auto-fix
+mypy src                 # Type checking
+black src                # Format
 ```
 
 ### Building
 ```bash
-# Build Python package
-uv build
-
-# Build Tauri desktop app
-npm run tauri:build
-
-# Build frontend assets
-npm run build
+uv build                 # Python package
+npm run tauri:build       # Tauri desktop app
+npm run build             # Frontend assets
 ```
 
-### Frontend Development
-```bash
-# Start frontend dev server
-npm run dev
+---
 
-# Run frontend linting
-npm run lint
+## Architecture Deep Dive
 
-# Run TypeScript type checking
-npm run type-check
+### Request Flow (Chat Turn)
 
-# Format frontend code
-npm run format
+```
+User Message → frontend → POST /api/v1/ragforge/chat
+  → chat_turns.execute_turn()
+    → state.meta_agent.run(MetaAgentInput)
+      → _run_sync()
+        → 1. Silicon Colosseum preflight (OPA policy check)
+        → 2. QueryRouter classifies intent
+        │     ├── TABLE_LOOKUP / MULTI_LOOKUP / INTERPOLATE / UNIT_CONVERT
+        │     │     → CalcEngine (deterministic SQLite interpolation)
+        │     │     → CoherenceGate (verify every number)
+        │     │     → Return formatted result
+        │     └── General / RAG query
+        │           → _hybrid_search() [branches on vector store type]
+        │           │   ├── RuVectorStore: GNN-HNSW unified search
+        │           │   └── Fallback: dense + FTS5 sparse fusion
+        │           → CognitiveRAG 7-stage pipeline
+        │           → _run_llm_sync() (ruvllm or llama-cpp-python)
+        │           → SAMR-lite faithfulness check
+        → 3. Post-flight: build reasoning trace, citations, suggestions
+  → ChatResponse (with ThinkingBlock, citations, faithfulness_score)
 ```
 
-### Docker Services
-```bash
-# Start optional self-hosted services (Langfuse, Neo4j, OPA)
-docker compose up -d
+### Vector Store Architecture (RuVector)
 
-# Stop Docker services
-docker compose down
+**RuVectorStore** (`src/modules/ragforge/ruvector_store.py`) implements the LangChain `VectorStore` interface, bridging Python to the RuVector NPM CLI:
 
-# View Docker service logs
-docker compose logs -f
+| Method | Implementation |
+|:-------|:---------------|
+| `add_texts()` | Writes texts + metadata to a `.jsonl` temp file, calls `npx ruvector rvf ingest <.rvf> -d <.jsonl>` |
+| `similarity_search()` | Embeds query, calls `npx ruvector rvf query <.rvf> -q <embedding> -k <k>`, parses JSON results |
+| `get()` | Returns empty — RuVector CLI doesn't support metadata-only queries (debug log, no warning) |
+| `delete()` | Writes IDs to temp JSON, calls `npx ruvector rvf delete <.rvf> -i <ids.json>` |
+| `_rvf_path()` | Returns `<persist_directory>/main.rvf` |
+
+**Key design decision**: The `_hybrid_search()` method in `meta_agent.py` checks `type(self.vector_store).__name__` at runtime. If the store is `RuVectorStore`, it uses RuVector's unified GNN-HNSW search (which internally fuses dense + sparse). Otherwise, it falls back to the dense + FTS5 hybrid path with Reciprocal Rank Fusion.
+
+### Ingestion Pipeline (ragforge_indexer.py)
+
+```
+File → Idempotency Guard (check mtime vs registry)
+  → Dedup: vector_store.get(where={source}) → .delete(ids)
+  → Smart Loading:
+  │   ├── Digital PDF: IBM Docling (tables, equations, reading order)
+  │   ├── Scanned PDF: PyMuPDF page images → VLM visual extraction
+  │   └── Text/MD/CSV: Direct load
+  → Semantic Chunking (section/table/equation boundaries)
+  → Progressive Commit:
+  │   ├── vector_store.add_documents(batch) → RuVector .rvf
+  │   ├── sparse_index.add_documents(batch) → FTS5 SQLite
+  │   └── TableExtractor → structured_data.db (for CalcEngine)
+  → Document Registry update (status, chunk_count, mtime)
 ```
 
-## Architecture Overview
+### Learning Architecture
 
-### Backend (Python/FastAPI)
-- **Dependency Injection**: Central `Container` manages service lifecycle
-- **Modular Design**: Plugin modules extend functionality (RAGForge, StreamSync, etc.)
-- **LangGraph Integration**: MetaAgent orchestrates reasoning workflows
-- **Local Inference**: ruvllm native Rust GGUF runtime with Qwen2.5-7B-Instruct (Ollama fallback)
-- **Storage**: RuVector GNN-HNSW (hybrid semantic + BM25 search), SQLite FTS5 (sparse), encrypted SQLite (sessions)
-- **Query Router**: Deterministic routing — calculation queries bypass LLM, go directly to CalcEngine + SQLite
-- **Coherence Gate**: Every number in LLM explanations verified against calc engine traces
+**Replay Buffer** → stores every accepted response (Parquet + Fernet encryption)
 
-### Frontend (React/Tauri)
-- **Module-Based UI**: Separate panels for different AI capabilities
-- **X-Ray Debugging**: Real-time causal tracing of reasoning processes
-- **Session Management**: Persistent chat histories with export
-- **Policy Editor**: Visual interface for OPA Rego policies
+**OPLoRA Nightly** (3 AM batch):
+1. Read day's replay buffer
+2. Compute SVD of current weight subspace
+3. Build orthogonal projector: P = I − UₖUₖᵀ
+4. Apply projected gradient updates: ΔW_safe = P_left · ΔW · P_right
+5. Merge into model weights
 
-### Key Components
-1. **Container System** (`src/core/container.py`): Manages service lifecycle and dependencies
-2. **MetaAgent** (`src/meta_agent.py`): LangGraph-based supervisor for complex reasoning
-3. **RAGForge** (`src/modules/ragforge/`): 7-stage cognitive retrieval pipeline
-4. **OPLoRA** (`src/learning/`): Continual learning system with orthogonal projection
-5. **Silicon Colosseum** (`src/guardrails/`): Deterministic alignment using OPA policies
-6. **StreamSync** (`src/modules/streamsync/`): Live folder monitoring and RSS integration
+**SONA Per-Request** (optional, requires `ruvector-sona`):
+- Tier 1: MicroLoRA rank-2 (<1ms adaptation)
+- Tier 2: EWC++ consolidation (prevent forgetting between tiers)
+- Tier 3: ReasoningBank (store successful trajectories as curriculum)
 
-### Core Services Architecture
-The application uses a dependency injection container (`src/core/container.py`) that manages the lifecycle of core services:
-- **ReplayBuffer**: Stores interaction history for continual learning
-- **HistoryManager**: Manages conversation history
-- **RuVectorStore**: RuVector GNN-HNSW hybrid vector + BM25 search (replaces ChromaDB)
-- **SparseIndex**: SQLite FTS5 for sparse retrieval (handled by RuVector hybrid when available)
-- **SessionStore**: Encrypted SQLite storage for chat sessions
-- **SiliconColosseum**: OPA-based policy enforcement
-- **MetaAgent**: LangGraph supervisor for reasoning workflows
-- **DocumentIntelligence**: VLM-based document processing
-- **SyncManager**: Peer-to-peer synchronization
-- **CalcEngine** (`src/core/calc_engine.py`): Deterministic table interpolator — no LLM arithmetic
-- **QueryRouter** (`src/core/query_router.py`): Intent classifier that fires before any LLM call
-- **TableExtractor** (`src/modules/ragforge/table_extractor.py`): Tables → SQLite at ingestion time
-- **CoherenceGate** (`src/guardrails/coherence_gate.py`): Number trace verifier for calc responses
-- **SONAAdapter** (`src/learning/sona_adapter.py`): Per-request SONA 3-tier real-time learning
-- **ruvllm_bridge** (`src-tauri/src/ruvllm_bridge.rs`): Rust Tauri command for native LLM inference
-- **ThinkingBlock** (`frontend/src/components/ThinkingBlock.tsx`): Collapsible CoT display
+### Boot-Sweep (Startup Housekeeping)
+
+In `app_factory.py` lifespan → `document_registry.purge_missing_files()`:
+1. Reads all records from `document_registry.db`
+2. Cross-references each `source_path` against `data/LiveFolder/` and `data/uploads/`
+3. Deletes records where the file no longer exists on disk
+4. Logs count of purged ghost documents
+
+### CalcEngine & QueryRouter
+
+**QueryRouter** (`src/core/query_router.py`):
+- Uses regex patterns to classify query intent: `TABLE_LOOKUP`, `MULTI_LOOKUP`, `INTERPOLATE`, `UNIT_CONVERT`, or `GENERAL`
+- `extract_draft()`: Extracts draft value in metres from query text
+- `extract_column()`: Maps keywords to column names (e.g., "TPC" → "tpc", "TPC and MTC" → "multi")
+- `extract_sg()`: Extracts specific gravity for dock water corrections
+
+**CalcEngine** (`src/core/calc_engine.py`):
+- `lookup_hydrostatic(vessel_id, draft, column)`: Exact lookup or linear interpolation from SQLite
+- `lookup_all_hydrostatic(vessel_id, draft)`: All columns at once
+- `apply_sg_correction(sw_value, sg)`: Salt water → dock water correction
+- `apply_fw_correction(sw_value)`: Salt water → fresh water correction
+
+---
+
+## Core Services Architecture
+
+The Container (`src/core/container.py`) manages service lifecycle:
+
+| Service | Class | Purpose |
+|:--------|:------|:--------|
+| `vector_store` | `RuVectorStore` | Primary vector store (GNN-HNSW) |
+| `sparse_index` | `SparseIndex` | FTS5 BM25 keyword search |
+| `meta_agent` | `MetaAgent` | LangGraph supervisor (the brain) |
+| `document_registry` | `DocumentRegistry` | File-level metadata + boot-sweep |
+| `document_intelligence` | `DocumentIntelligenceService` | Upload + VLM processing manager |
+| `colosseum` | `SiliconColosseum` | OPA/Rego policy engine |
+| `session_store` | `SessionStore` | SQLCipher encrypted sessions |
+| `export_engine` | `ExportEngine` | PDF/Markdown export |
+| `replay_buffer` | `ReplayBuffer` | Encrypted interaction storage |
+| `history_manager` | `HistoryManager` | Conversation history |
+| `sync_manager` | `SyncManager` | P2P device sync |
 
 ### Module Plugins
-The system is extensible through module plugins located in `src/modules/`:
+Located in `src/modules/`, extending `BaseModule`:
 - **CoreModule**: Essential tools and utilities
 - **WatchTowerModule**: System monitoring and observability
-- **StreamSyncModule**: Live folder and RSS monitoring
-- **AnalyticsModule**: Usage statistics and insights
-- **RagForgeModule**: Cognitive retrieval pipeline
-- **TuneLabModule**: Learning monitoring and visualization
-- **LocalBuddyModule**: Local AI assistant capabilities
-- **SyncModule**: Peer-to-peer synchronization tools
+- **StreamSyncModule**: LiveFolder watcher + RSS feeder
+- **AnalyticsModule**: Usage statistics and data analysis
+- **RagForgeModule**: CognitiveRAG™ retrieval pipeline
+- **TuneLabModule**: Learning monitoring and visualisation
+- **LocalBuddyModule**: Local AI assistant
+- **SyncModule**: P2P synchronisation tools
+
+---
 
 ## Common Development Tasks
 
@@ -209,20 +292,26 @@ The system is extensible through module plugins located in `src/modules/`:
 - Tests use extensive mocking to avoid heavy dependencies
 - Fixtures in `conftest.py` provide consistent test environments
 - Use `tmp_path` fixture for temporary data directories
-- Run individual tests with `pytest tests/test_file.py::test_function_name`
 
-### Environment Configuration
-The application uses environment variables defined in `.env` for configuration:
-- **Model Settings**: QWEN_MODEL_PATH, BITNET_MODEL_PATH (legacy fallback), BITNET_N_CTX, BITNET_N_GPU_LAYERS
-- **Storage Paths**: DATA_DIR, CHROMA_PATH (legacy), REPLAY_BUFFER_PATH
-- **Security**: SQLCIPHER_KEY_FILE for encrypted storage
-- **Guardrails**: SILICON_COLOSSEUM_MIN_FAITHFULNESS=0.55, SILICON_COLOSSEUM_FAITHFULNESS_ACTION=block
-- **Telemetry**: LANGFUSE_* settings for optional self-hosted telemetry
-- **Network**: AETHERFORGE_HOST, AETHERFORGE_PORT for server configuration
+---
+
+## Environment Configuration
+
+Key environment variables (`.env`):
+
+| Variable | Default | Purpose |
+|:---------|:--------|:--------|
+| `QWEN_MODEL_PATH` | `/Volumes/Apple/AI Model/qwen2.5-7b-instruct-q4_k_m.gguf` | GGUF model path |
+| `DATA_DIR` | `data` | Persistent storage root |
+| `SQLCIPHER_KEY_FILE` | `data/.sqlcipher_key` | Session encryption key |
+| `SILICON_COLOSSEUM_MIN_FAITHFULNESS` | `0.55` | Min faithfulness score |
+| `SILICON_COLOSSEUM_FAITHFULNESS_ACTION` | `block` | Action on low faithfulness |
+| `HF_HOME` | `/Volumes/Apple/AI Model/hf_cache` | HuggingFace cache directory |
+| `AETHERFORGE_HOST` | `127.0.0.1` | Server host |
+| `AETHERFORGE_PORT` | `8765` | Server port |
 
 ### Background Services
-Several background services run continuously:
 - **RSS Poller**: Periodically checks RSS feeds for updates
-- **Directory Watcher**: Monitors LiveFolder for file changes
-- **Scheduler**: Runs periodic jobs like nightly OPLoRA training
-- **Sync Manager**: Handles peer-to-peer synchronization
+- **Directory Watcher**: Monitors `data/LiveFolder/` for file changes
+- **Scheduler**: APScheduler for nightly OPLoRA training (3 AM)
+- **Sync Manager**: Handles P2P device synchronisation

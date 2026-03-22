@@ -77,6 +77,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── 2. Initialize Core Services via Container ────────────────
     await container.initialize_all(state)
 
+    # ── 2b. Boot-Sweep: Purge stale document registry entries ───
+    # Cross-reference DB records against actual files on disk.
+    # Entries for files that no longer exist (e.g. removed from LiveFolder)
+    # are deleted so the UI doesn't show ghost documents.
+    try:
+        doc_reg = container.get_service("document_registry")
+        live_folder = settings.data_dir.resolve() / "LiveFolder"
+        uploads_dir = settings.data_dir.resolve() / "uploads"
+        purged = doc_reg.purge_missing_files(live_folder, uploads_dir)
+        if purged:
+            logger.info("Boot-sweep purged stale documents", count=purged)
+    except Exception as e:
+        logger.warning("Boot-sweep purge failed (non-fatal)", error=str(e))
+
     # ── 3. Background Utility Tasks ─────────────────────────────
     # Location (Background)
     async def _fetch_location() -> None:

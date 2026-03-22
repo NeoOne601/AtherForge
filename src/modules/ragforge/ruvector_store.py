@@ -223,12 +223,11 @@ class RuVectorStore(VectorStore):
 
         Used by ragforge_tree.py to fetch document section structure.
         Returns empty result set since RuVector CLI doesn't support
-        metadata-only queries — when RuVector becomes primary, this
-        should be implemented via `rvf get` or direct RuVector API.
+        metadata-only queries. The HTI tree view will show empty until
+        RuVector implements a native metadata query API.
         """
-        logger.warning(
-            "RuVectorStore.get() called — not yet implemented for metadata queries. "
-            "Use ChromaDB as primary store for HTI tree view."
+        logger.debug(
+            "RuVectorStore.get() — metadata queries not yet supported by RuVector CLI"
         )
         return {
             "ids": [],
@@ -236,4 +235,46 @@ class RuVectorStore(VectorStore):
             "metadatas": [],
             "embeddings": [],
         }
+
+    def delete(
+        self,
+        ids: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Delete vectors by ID from the .rvf database.
+
+        Called by ragforge_indexer.py dedup logic before re-indexing a
+        document. Attempts bulk delete via `rvf delete`; if the CLI
+        subcommand doesn't exist yet, logs a warning and continues
+        (the next ingest will overwrite by ID anyway).
+        """
+        if not ids:
+            return
+        try:
+            import tempfile as _tf
+
+            with _tf.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump(ids, f)
+                temp_path = f.name
+
+            proc = subprocess.run(
+                [
+                    "npx", "--yes", "ruvector", "rvf", "delete",
+                    self._rvf_path(), "-i", temp_path,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                logger.info("Deleted %d vectors from RuVectorStore", len(ids))
+            else:
+                logger.debug(
+                    "RuVector delete returned non-zero (CLI may not support delete yet): %s",
+                    proc.stderr.strip()[:200],
+                )
+        except Exception as e:
+            logger.debug("RuVector delete failed (non-fatal, will overwrite on re-ingest): %s", e)
+        finally:
+            if "temp_path" in locals() and os.path.exists(temp_path):
+                os.remove(temp_path)
 

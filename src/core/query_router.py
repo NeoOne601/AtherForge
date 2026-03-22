@@ -115,8 +115,21 @@ def extract_draft(query: str) -> Optional[float]:
 
 
 def extract_column(query: str) -> str:
-    """Extract which hydrostatic column is being asked for. Default: displacement."""
+    """Extract which hydrostatic column is being asked for.
+
+    Returns 'multi' when the query asks for more than one column (e.g. TPC AND MTC),
+    which signals the caller to use lookup_all_hydrostatic() instead of a single-column lookup.
+    Default: 'displacement'.
+    """
     q = query.lower()
+    # Detect multi-column requests (e.g. "TPC and MTC", "TPC, MTC")
+    multi_indicators = [
+        ("tpc" in q and "mtc" in q),
+        ("all particulars" in q or "all hydrostatic" in q),
+        ("hydrostatic particulars" in q),
+    ]
+    if any(multi_indicators):
+        return "multi"
     if "tpc" in q or "tonnes per cm" in q:
         return "tpc"
     if "mtc" in q or "moment to change trim" in q:
