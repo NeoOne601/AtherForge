@@ -57,12 +57,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ── Local IPC / WebSockets ───────────────────────────────────────
 tokio-tungstenite = "0.23"
 
-# ── RuVector Native Integration ──────────────────────────────────
-ruvector-core = { git = "https://github.com/ruvnet/ruvector", package = "ruvector-core" }
-ruvllm = { git = "https://github.com/ruvnet/ruvector", package = "ruvllm", features = ["metal"] }
-prime-radiant = { git = "https://github.com/ruvnet/ruvector", package = "prime-radiant" }
-rvf-runtime = { git = "https://github.com/ruvnet/ruvector", package = "rvf-runtime" }
-ruvector-sona = { git = "https://github.com/ruvnet/ruvector", package = "ruvector-sona" }
+# ── RuVector Native Integration (local — air-gap compliant) ──────
+# Source: https://github.com/ruvnet/ruvector (cloned once, vendored locally)
+# No internet required for builds. Fully offline. Fully sovereign.
+ruvector-core  = { path = "crates/ruvector-core" }
+ruvllm         = { path = "crates/ruvllm", features = ["metal"] }
+prime-radiant  = { path = "crates/prime-radiant" }
+rvf-runtime    = { path = "crates/rvf/rvf-runtime" }
+ruvector-sona  = { path = "crates/ruvector-sona" }
 
 [profile.release]
 # Aggressively optimize for size and speed on M1
