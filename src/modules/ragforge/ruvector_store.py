@@ -212,3 +212,28 @@ class RuVectorStore(VectorStore):
         )
         store.add_texts(texts, metadatas=metadatas)
         return store
+
+    def get(
+        self,
+        where: Optional[dict] = None,
+        include: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> dict:
+        """ChromaDB-compatible .get() for metadata queries.
+
+        Used by ragforge_tree.py to fetch document section structure.
+        Returns empty result set since RuVector CLI doesn't support
+        metadata-only queries — when RuVector becomes primary, this
+        should be implemented via `rvf get` or direct RuVector API.
+        """
+        logger.warning(
+            "RuVectorStore.get() called — not yet implemented for metadata queries. "
+            "Use ChromaDB as primary store for HTI tree view."
+        )
+        return {
+            "ids": [],
+            "documents": [],
+            "metadatas": [],
+            "embeddings": [],
+        }
+
