@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { RAGDoc } from "../../types";
 import { RAGTreePanel } from "../RAGTreePanel";
+import { CoherenceGraphPanel } from "../CoherenceGraphPanel";
 
 interface RAGForgeHUDProps {
     docs: RAGDoc[];
@@ -334,7 +335,7 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                                         onClick={() => setTreeBrowserDoc(
                                             treeBrowserDoc === d.name ? null : d.name
                                         )}
-                                        title="Browse document section tree"
+                                        title="Browse Document Coherence Graph"
                                         style={{
                                             background: treeBrowserDoc === d.name
                                                 ? "rgba(var(--plasma-rgb, 100,100,255), 0.15)"
@@ -405,9 +406,9 @@ export function RAGForgeHUD({ docs, setDocs }: RAGForgeHUDProps) {
                     ))}
                 </div>
             </div>
-            {/* HTI Tree Browser — Phase 15 */}
+            {/* Real-Time Coherence Graph Browser */}
             {treeBrowserDoc && (
-                <RAGTreePanel
+                <CoherenceGraphPanel
                     sourceName={treeBrowserDoc}
                     onClose={() => setTreeBrowserDoc(null)}
                 />

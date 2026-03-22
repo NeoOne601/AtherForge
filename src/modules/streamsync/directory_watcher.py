@@ -27,10 +27,14 @@ class AutoIndexHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
+        if Path(event.src_path).name.startswith('.'):
+            return
         self._handle_event(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
+            return
+        if Path(event.dest_path).name.startswith('.'):
             return
         # src_path is the old path, dest_path is the new path inside our watch_dir
         self._handle_event(event.dest_path)

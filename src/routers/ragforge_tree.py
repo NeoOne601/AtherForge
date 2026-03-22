@@ -125,6 +125,85 @@ async def get_document_tree(source_name: str, request: Request) -> JSONResponse:
         return JSONResponse({"source": source_name, "tree": [], "error": str(exc)}, status_code=500)
 
 
+@router.get("/graph/{source_name}")
+async def get_document_graph(source_name: str, request: Request) -> JSONResponse:
+    """
+    Generates a coherent node/edge graph from the document's structural metadata.
+    Simulates @ruvector/graph-node traversing SONA clustered patterns.
+    """
+    state = request.app.state.app_state
+    vector_store = state.vector_store
+
+    try:
+        results = vector_store.get(
+            where={"source": source_name},
+            include=["metadatas"],
+        )
+        metadatas: list[dict[str, Any]] = results.get("metadatas", [])
+        if not metadatas:
+            return JSONResponse({"nodes": [], "edges": []})
+
+        nodes = []
+        edges = []
+        section_clusters = set()
+
+        # Root node
+        nodes.append({
+            "id": "root", 
+            "data": {"label": source_name, "type": "document"}, 
+            "position": {"x": 250, "y": 0},
+            "type": "default",
+            "style": {"background": "#e0e7ff", "border": "1px solid #c7d2fe", "borderRadius": "8px", "padding": "10px"}
+        })
+
+        y_offset = 100
+        for i, meta in enumerate(metadatas[:150]):  # Limit to 150 chunks to prevent huge browser graphs
+            chunk_id = meta.get("chunk_id", f"chunk_{i}")
+            section = meta.get("section", "Unknown")
+            cluster_id = f"cluster_{hash(section) % 10000}"
+
+            # Create SONA Pattern Cluster (Parent Node) if not exists
+            if cluster_id not in section_clusters:
+                section_clusters.add(cluster_id)
+                nodes.append({
+                    "id": cluster_id,
+                    "data": {"label": f"Cluster: {section[:30]}...", "type": "cluster"},
+                    "position": {"x": (len(section_clusters) % 3) * 300, "y": y_offset},
+                    "type": "default",
+                    "style": {"background": "rgba(99, 102, 241, 0.1)", "border": "2px dashed #6366f1", "width": 250, "height": 150}
+                })
+                edges.append({"id": f"e_root_{cluster_id}", "source": "root", "target": cluster_id, "animated": True})
+                y_offset += 200
+
+            # Add Chunk Node inside the cluster
+            # ReactFlow uses parentNode for sub-nodes
+            node_x = 20 + ((i % 2) * 110)
+            node_y = 40 + ((i % 2) * 50)
+            nodes.append({
+                "id": chunk_id,
+                "data": {"label": f"Chunk {i}\nType: {meta.get('chunk_type', 'text')}"},
+                "position": {"x": node_x, "y": node_y},
+                "parentNode": cluster_id,
+                "extent": "parent",
+                "style": {"background": "#ffffff", "fontSize": "10px", "padding": "4px", "borderRadius": "4px"}
+            })
+
+            # Sequential coherence edge (Link to previous chunk if in same section)
+            if i > 0 and metadatas[i-1].get("section") == section:
+                prev_chunk = metadatas[i-1].get("chunk_id", f"chunk_{i-1}")
+                edges.append({
+                    "id": f"e_seq_{prev_chunk}_{chunk_id}",
+                    "source": prev_chunk,
+                    "target": chunk_id,
+                    "type": "straight",
+                    "style": {"stroke": "#94a3b8"}
+                })
+
+        return JSONResponse({"nodes": nodes, "edges": edges})
+    except Exception as e:
+        logger.error("Failed to generate graph: %s", e)
+        return JSONResponse({"nodes": [], "edges": []})
+
 @router.get("/{source_name}/section/{section_id}")
 async def get_section_chunks(
     source_name: str, section_id: str, request: Request

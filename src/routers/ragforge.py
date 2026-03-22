@@ -254,7 +254,7 @@ async def list_live_folder(request: Request) -> JSONResponse:
     # Get all files in LiveFolder
     file_entries = []
     for fp in sorted(live_folder.iterdir()):
-        if not fp.is_file():
+        if not fp.is_file() or fp.name.startswith('.'):
             continue
         try:
             stat = fp.stat()

@@ -371,7 +371,13 @@ def load_with_docling(
                         # Path B: pandas DataFrame fallback (existing)
                         if hasattr(item, "export_to_dataframe"):
                             calc_engine = CalcEngine(db_path=settings.data_dir / "structured_data.db")
-                            df = item.export_to_dataframe()
+                            try:
+                                import inspect
+                                sig = inspect.signature(item.export_to_dataframe)
+                                df = item.export_to_dataframe(doc) if "doc" in sig.parameters else item.export_to_dataframe()
+                            except Exception:
+                                df = item.export_to_dataframe()
+                                
                             if not df.empty:
                                 calc_engine.ingest_hydrostatic_table(vessel_id, df)
                     except Exception as e:
