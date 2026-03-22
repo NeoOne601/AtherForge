@@ -337,18 +337,42 @@ def load_with_docling(
                 if item_label == "table":
                     chunk_type, max_chars = "table", MAX_TABLE_CHARS
                     
-                    # --- NEW: STRUCTURED TABLE INGESTION ---
+                    # --- STRUCTURED TABLE INGESTION ---
                     try:
                         from src.modules.ragforge.calc_engine import CalcEngine
+                        from src.modules.ragforge.table_extractor import extract_tables_to_sqlite
                         from src.config import get_settings
                         settings = get_settings()
-                        calc_engine = CalcEngine(db_path=settings.data_dir / "structured_data.db")
-                        
+                        db_path = settings.data_dir / "structured_data.db"
+                        vessel_id = filepath.name.split(" - ")[0].strip() if " - " in filepath.name else filepath.stem
+
+                        # Path A: Docling-native table objects (header_cells / data_rows)
+                        if hasattr(item, "header_cells") and hasattr(item, "data_rows"):
+                            from src.modules.ragforge.table_extractor import (
+                                parse_docling_table, classify_table_domain, ensure_tables,
+                                _insert_hydrostatic, _insert_tank_capacity, _insert_gz_curve,
+                            )
+                            import sqlite3
+                            conn = sqlite3.connect(str(db_path))
+                            ensure_tables(conn)
+                            headers, rows = parse_docling_table(item)
+                            if headers and rows:
+                                domain = classify_table_domain(headers)
+                                if domain == "hydrostatic":
+                                    _insert_hydrostatic(conn, vessel_id, rows)
+                                elif domain == "tank_capacity":
+                                    _insert_tank_capacity(conn, vessel_id, rows)
+                                elif domain == "gz_curve":
+                                    _insert_gz_curve(conn, vessel_id, rows)
+                                logger.info("Table extractor: %d %s rows from '%s'", len(rows), domain, filepath.name)
+                            conn.commit()
+                            conn.close()
+
+                        # Path B: pandas DataFrame fallback (existing)
                         if hasattr(item, "export_to_dataframe"):
+                            calc_engine = CalcEngine(db_path=settings.data_dir / "structured_data.db")
                             df = item.export_to_dataframe()
                             if not df.empty:
-                                # Simple vessel_id extraction from filename like "HA - 13 LOADING..."
-                                vessel_id = filepath.name.split(" - ")[0].strip() if " - " in filepath.name else filepath.stem
                                 calc_engine.ingest_hydrostatic_table(vessel_id, df)
                     except Exception as e:
                         logger.warning(f"Failed structured table ingestion for {filepath.name}: {e}")

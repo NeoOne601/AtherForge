@@ -7,10 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 AetherForge is a Sovereign Intelligence OS that implements a Closed-Loop Perpetual Learning architecture with air-gapped security. It bridges high-performance LLMs with edge-device privacy requirements using local inference and continual learning without catastrophic forgetting.
 
 Key innovations:
-- OPLoRA: Orthogonal Projection LoRA for perpetual learning without forgetting
+- OPLoRA + SONA: Perpetual learning with 3-tier real-time adaptation and nightly consolidation
 - CognitiveRAG™: 7-stage reasoning pipeline with self-verification
 - Silicon Colosseum: Deterministic policy engine using OPA/Rego
-- BitNet 1.58-bit ternary inference optimized for Apple Silicon
+- Query Router + CalcEngine: Deterministic calculation for numeric queries (LLMs explain; they never calculate)
+- ruvllm: Native Rust GGUF runtime (Qwen2.5-7B-Instruct) via Tauri commands
+- Coherence Gate: Post-generation number verification against calc traces
 
 ## Repository Structure
 
@@ -137,8 +139,10 @@ docker compose logs -f
 - **Dependency Injection**: Central `Container` manages service lifecycle
 - **Modular Design**: Plugin modules extend functionality (RAGForge, StreamSync, etc.)
 - **LangGraph Integration**: MetaAgent orchestrates reasoning workflows
-- **Local Inference**: llama-cpp-python with BitNet GGUF models
-- **Storage**: ChromaDB (dense search), SQLite FTS5 (sparse search), encrypted SQLite (sessions)
+- **Local Inference**: ruvllm native Rust GGUF runtime with Qwen2.5-7B-Instruct (Ollama fallback)
+- **Storage**: RuVector GNN-HNSW (hybrid semantic + BM25 search), SQLite FTS5 (sparse), encrypted SQLite (sessions)
+- **Query Router**: Deterministic routing — calculation queries bypass LLM, go directly to CalcEngine + SQLite
+- **Coherence Gate**: Every number in LLM explanations verified against calc engine traces
 
 ### Frontend (React/Tauri)
 - **Module-Based UI**: Separate panels for different AI capabilities
@@ -158,13 +162,20 @@ docker compose logs -f
 The application uses a dependency injection container (`src/core/container.py`) that manages the lifecycle of core services:
 - **ReplayBuffer**: Stores interaction history for continual learning
 - **HistoryManager**: Manages conversation history
-- **VectorStore**: ChromaDB for dense retrieval
-- **SparseIndex**: SQLite FTS5 for sparse retrieval
+- **RuVectorStore**: RuVector GNN-HNSW hybrid vector + BM25 search (replaces ChromaDB)
+- **SparseIndex**: SQLite FTS5 for sparse retrieval (handled by RuVector hybrid when available)
 - **SessionStore**: Encrypted SQLite storage for chat sessions
 - **SiliconColosseum**: OPA-based policy enforcement
 - **MetaAgent**: LangGraph supervisor for reasoning workflows
 - **DocumentIntelligence**: VLM-based document processing
 - **SyncManager**: Peer-to-peer synchronization
+- **CalcEngine** (`src/core/calc_engine.py`): Deterministic table interpolator — no LLM arithmetic
+- **QueryRouter** (`src/core/query_router.py`): Intent classifier that fires before any LLM call
+- **TableExtractor** (`src/modules/ragforge/table_extractor.py`): Tables → SQLite at ingestion time
+- **CoherenceGate** (`src/guardrails/coherence_gate.py`): Number trace verifier for calc responses
+- **SONAAdapter** (`src/learning/sona_adapter.py`): Per-request SONA 3-tier real-time learning
+- **ruvllm_bridge** (`src-tauri/src/ruvllm_bridge.rs`): Rust Tauri command for native LLM inference
+- **ThinkingBlock** (`frontend/src/components/ThinkingBlock.tsx`): Collapsible CoT display
 
 ### Module Plugins
 The system is extensible through module plugins located in `src/modules/`:
@@ -202,9 +213,10 @@ The system is extensible through module plugins located in `src/modules/`:
 
 ### Environment Configuration
 The application uses environment variables defined in `.env` for configuration:
-- **Model Settings**: BITNET_MODEL_PATH, BITNET_N_CTX, BITNET_N_GPU_LAYERS
-- **Storage Paths**: DATA_DIR, CHROMA_PATH, REPLAY_BUFFER_PATH
+- **Model Settings**: QWEN_MODEL_PATH, BITNET_MODEL_PATH (legacy fallback), BITNET_N_CTX, BITNET_N_GPU_LAYERS
+- **Storage Paths**: DATA_DIR, CHROMA_PATH (legacy), REPLAY_BUFFER_PATH
 - **Security**: SQLCIPHER_KEY_FILE for encrypted storage
+- **Guardrails**: SILICON_COLOSSEUM_MIN_FAITHFULNESS=0.55, SILICON_COLOSSEUM_FAITHFULNESS_ACTION=block
 - **Telemetry**: LANGFUSE_* settings for optional self-hosted telemetry
 - **Network**: AETHERFORGE_HOST, AETHERFORGE_PORT for server configuration
 

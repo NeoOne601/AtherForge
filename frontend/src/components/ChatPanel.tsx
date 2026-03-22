@@ -157,6 +157,17 @@ export function ChatPanel({
         }));
     }, []);
 
+    const appendThinkingChunk = useCallback((moduleId: string, messageId: string, chunk: string) => {
+        setMessagesByModule(prev => ({
+            ...prev,
+            [moduleId]: (prev[moduleId] || []).map(msg => (
+                msg.id === messageId
+                    ? { ...msg, thinking: (msg.thinking || "") + chunk, isThinkingStreaming: true, streaming: true }
+                    : msg
+            )),
+        }));
+    }, []);
+
     const handleRefineClick = useCallback(async () => {
         const text = input.trim();
         if (!grammarAssist || !text || text.length < 10 || loading || refining) return;
@@ -203,18 +214,15 @@ export function ChatPanel({
         }
     }, [module]);
 
-    const handleSuggestionClick = useCallback((suggestion: string) => {
+    const handleSuggestionSubmit = useCallback((suggestion: string) => {
         setInput(suggestion);
-        if (textareaRef.current) {
-            textareaRef.current.focus();
-            // Trigger autosize
-            setTimeout(() => {
-                if (textareaRef.current) {
-                    textareaRef.current.style.height = "auto";
-                    textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + "px";
-                }
-            }, 0);
-        }
+        // Use a short timeout to let state update, then trigger send
+        setTimeout(() => {
+            const sendBtn = document.querySelector('.send-btn') as HTMLButtonElement;
+            if (sendBtn && !sendBtn.disabled) {
+                sendBtn.click();
+            }
+        }, 50);
     }, []);
 
     useEffect(() => {
@@ -281,12 +289,25 @@ export function ChatPanel({
                                 return;
                             }
 
+                            if (chunk.type === "thinking") {
+                                appendThinkingChunk(moduleId, assistantId, chunk.content);
+                                return;
+                            }
+
+                            if (chunk.type === "thinking_complete") {
+                                patchMessage(moduleId, assistantId, {
+                                    isThinkingStreaming: false,
+                                    thinkingDurationMs: chunk.duration_ms,
+                                });
+                                return;
+                            }
+
                             if (chunk.type === "reasoning") {
                                 appendReasoningChunk(moduleId, assistantId, chunk.content);
                                 return;
                             }
 
-                            if (chunk.type === "token") {
+                            if (chunk.type === "answer" || chunk.type === "token") {
                                 appendMessageChunk(moduleId, assistantId, chunk.content);
                                 return;
                             }
@@ -304,6 +325,9 @@ export function ChatPanel({
                                     streaming: false,
                                     latency_ms: chunk.latency_ms,
                                     faithfulness_score: chunk.faithfulness_score ?? undefined,
+                                    thinking: chunk.thinking ?? chunk.reasoning_summary ?? chunk.reasoning_trace ?? undefined,
+                                    thinkingDurationMs: chunk.thinking_duration_ms ?? undefined,
+                                    isThinkingStreaming: false,
                                     reasoning_trace: chunk.reasoning_summary ?? chunk.reasoning_trace ?? undefined,
                                     answer_text: chunk.answer_text ?? undefined,
                                     policy_decisions: chunk.policy_decisions,
@@ -459,8 +483,16 @@ export function ChatPanel({
                         </div>
                     ) : (
                         <>
-                            {messages.map(m => (
-                                <MessageBubble key={m.id} msg={m} showThinking={showThinking} onSuggestionClick={handleSuggestionClick} />
+                            {messages.map((m, i) => (
+                                <MessageBubble
+                                    key={m.id}
+                                    msg={m}
+                                    showThinking={showThinking}
+                                    onSuggestionClick={(s) => { setInput(s); textareaRef.current?.focus(); }}
+                                    onSuggestionSubmit={handleSuggestionSubmit}
+                                    isLatestMessage={i === messages.length - 1}
+                                    isStreaming={loading}
+                                />
                             ))}
                             {loading && !messages.some(m => m.streaming) && (
                                 <div className="message-row">

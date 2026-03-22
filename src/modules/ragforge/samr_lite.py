@@ -16,12 +16,13 @@
 #
 # Faithfulness Score (calibrated for CognitiveRAG synthesized answers):
 #   ≥ 0.55 → GROUNDED  (answer is semantically consistent with sources)
-#   < 0.55 → LOW_CONFIDENCE (answer may contain hallucinations)
-#   < 0.30 → LIKELY_HALLUCINATION (answer barely relates to sources)
+#   < 0.55 → LOW_CONFIDENCE (answer may contain hallucinations) → BLOCKED
+#   < 0.30 → LIKELY_HALLUCINATION (answer barely relates to sources) → BLOCKED
 #
-# Note: CognitiveRAG produces chain-of-thought synthesized answers that
-# naturally have lower cosine similarity to raw chunks than verbatim
-# retrieval. The thresholds are tuned accordingly.
+# Action: FaithfulnessError is RAISED when score < threshold.
+# The meta-agent catches it and returns a safe refusal message.
+# LLMs EXPLAIN. Deterministic engines CALCULATE. Citations PROVE.
+# Never warn-and-deliver.
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
@@ -36,6 +37,21 @@ logger = structlog.get_logger("aetherforge.ragforge.samr_lite")
 GROUNDED_THRESHOLD = 0.55  # answer is grounded in sources
 LOW_CONFIDENCE_THRESHOLD = 0.30  # answer is questionable
 DEFAULT_DIMS = 384  # all-MiniLM-L6-v2 embedding dimensions
+
+
+class FaithfulnessError(Exception):
+    """Raised when an LLM response fails the faithfulness check.
+
+    The meta-agent catches this and returns a safe refusal message
+    instead of delivering the ungrounded response to the user.
+    """
+
+    def __init__(self, score: float, threshold: float) -> None:
+        super().__init__(
+            f"Faithfulness score {score:.2f} below threshold {threshold:.2f}"
+        )
+        self.score = score
+        self.threshold = threshold
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -152,10 +168,13 @@ def run_samr_lite(
     Computes semantic similarity between the LLM answer and each retrieved
     document chunk.  The maximum similarity is inverted to produce a
     Laplacian-proxy energy score.  High energy (>0.70) means the answer
-    is not grounded and gets blocked.
+    is not grounded and gets BLOCKED by raising FaithfulnessError.
 
     This is the ONLY coherence pathway — there is no legacy SAMR-lite
-    cosine fallback.
+    cosine fallback. Never warn-and-deliver.
+
+    Raises:
+        FaithfulnessError: when the answer fails the faithfulness check.
     """
     try:
         if not retrieved_docs:
@@ -186,26 +205,32 @@ def run_samr_lite(
         if energies:
             energy = 1.0 - max_sim
         else:
-            # ALL chunks failed — treat as low-confidence (warn, don't block)
-            logger.warning("All ruvllm similarity calls failed — passing answer with low confidence")
-            energy = 0.5  # neutral — not enough evidence to block
+            # ALL chunks failed — treat as low-confidence, BLOCK delivery
+            logger.warning("All ruvllm similarity calls failed — blocking answer (no evidence)")
+            raise FaithfulnessError(score=0.0, threshold=threshold)
 
+        faithfulness_score = max(0.0, 1.0 - energy)
         is_blocked = energy > 0.70
-        verdict = "HALLUCINATION_BLOCKED" if is_blocked else "SUPPORTED"
 
         logger.info(
             "Prime Radiant Gate | energy=%.3f blocked=%s chunks_measured=%d/%d",
             energy, is_blocked, len(energies), len(retrieved_docs),
         )
 
+        if is_blocked:
+            raise FaithfulnessError(score=faithfulness_score, threshold=threshold)
+
         return {
-            "verdict": verdict,
-            "faithfulness_score": max(0.0, 1.0 - energy),
-            "blocked": is_blocked,
+            "verdict": "SUPPORTED",
+            "faithfulness_score": faithfulness_score,
+            "blocked": False,
             "witness": "ruvector_similarity",
             "chunks_measured": len(energies),
         }
 
+    except FaithfulnessError:
+        # Re-raise FaithfulnessError — don't catch it in the broad except
+        raise
     except Exception as e:
         logger.error("Coherence gate error: %s", e)
         return {

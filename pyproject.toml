@@ -88,12 +88,12 @@ dependencies = [
   "docling>=1.6.0",
   "mlx-vlm>=0.1.0",
   # ── RuVector Integration (Python Bindings) ───────────────────
-  # "ruvector>=0.1.0",
-  # "ruvllm>=0.1.0",
-  # "ruvector-sona>=0.1.0",
-  # "ruvector-refrag>=0.1.0",
-  # "prime-radiant-py>=0.1.0",
-  # "tiny-dancer>=0.1.0",
+  "ruvector>=0.1.0",
+  "ruvllm>=0.1.0",
+  "ruvector-sona>=0.1.0",
+  "ruvector-refrag>=0.1.0",
+  "prime-radiant-py>=0.1.0",
+  "tiny-dancer>=0.1.0",
 ]
 
 [project.optional-dependencies]

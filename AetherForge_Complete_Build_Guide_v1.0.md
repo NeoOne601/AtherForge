@@ -37,7 +37,7 @@ AetherForge v1.0 unifies **five of the hardest 2026 AI production problems** int
 | Black-box reasoning | X-Ray causal graph (ReactFlow + Neo4j) |
 | Static AI systems | Perpetual loop: replay buffer → nightly fine-tune |
 
-**Stack:** Python 3.12 · TypeScript 5.5 · Tauri 2.1 · React 18 · FastAPI · LangGraph · llama-cpp-python · OPA
+**Stack:** Python 3.12 · TypeScript 5.5 · Tauri 2.1 · React 18 · FastAPI · LangGraph · ruvllm (Qwen2.5-7B) · RuVector · OPA
 
 ---
 
@@ -56,19 +56,25 @@ AetherForge v1.0 unifies **five of the hardest 2026 AI production problems** int
 │  │   LangGraph Meta-Agent           │    │
 │  │   Supervisor with 5 sub-graphs   │    │
 │  │                                  │    │
+│  │  QueryRouter → CalcEngine path   │    │
 │  │  RAGForge   LocalBuddy           │    │
 │  │  WatchTower StreamSync TuneLab   │    │
 │  └────────────┬─────────────────────┘    │
 │               │ Every tool call          │
 │  ┌────────────▼─────────────────────┐    │
 │  │    Silicon Colosseum             │    │
-│  │    OPA Rego + FSM state machine  │    │
+│  │    OPA Rego + FSM + Coherence    │    │
 │  └──────────────────────────────────┘    │
 │                                          │
 │  ┌──────────┐  ┌─────────────────────┐   │
-│  │ BitNet   │  │ OPLoRA Learning     │   │
-│  │ 1.58-bit │  │ Engine              │   │
+│  │ ruvllm   │  │ OPLoRA + SONA       │   │
+│  │ Qwen2.5  │  │ Learning Engine     │   │
 │  │ (Metal)  │  │ SVD + Replay Buffer │   │
+│  └──────────┘  └─────────────────────┘   │
+│                                          │
+│  ┌──────────┐  ┌─────────────────────┐   │
+│  │ RuVector │  │ SQLite              │   │
+│  │ GNN-HNSW │  │ Structured Tables   │   │
 │  └──────────┘  └─────────────────────┘   │
 └──────────────────────────────────────────┘
 ```
@@ -78,11 +84,15 @@ AetherForge v1.0 unifies **five of the hardest 2026 AI production problems** int
 ```
 User Input
   → Silicon Colosseum pre-flight check (OPA + FSM)
-  → LangGraph meta-agent routes to module
-  → Module sub-graph executes (tool calls each checked by Colosseum)
-  → LLM generates response (BitNet, Metal-accelerated)
-  → Faithfulness score check (post-output Colosseum gate)
+  → QueryRouter classifies intent (calc vs. RAG vs. explain)
+  → If calc route: CalcEngine deterministic lookup from SQLite
+    → LLM explains result → Coherence Gate verifies numbers
+  → If RAG route: CognitiveRAG™ pipeline
+    → LLM generates response (ruvllm Qwen2.5-7B, Metal-accelerated)
+    → Faithfulness score check (SAMR-lite — blocks below 0.55)
+  → ThinkingBlock separates CoT from answer
   → Response returned to UI
+  → SONA on_interaction (MicroLoRA + ReasoningBank — non-blocking)
   → Interaction written to encrypted replay buffer (async)
   → X-Ray causal graph sent if xray_mode=true
 ```
@@ -158,14 +168,17 @@ cp .env.example .env  # Or run ./install.sh which creates it automatically
 Key `.env` settings:
 
 ```bash
-BITNET_MODEL_PATH=./models/bitnet-b1.58-2b-4t.gguf
+QWEN_MODEL_PATH=./models/qwen2.5-7b-instruct-q4_k_m.gguf
+BITNET_MODEL_PATH=./models/bitnet-b1.58-2b-4t.gguf  # Legacy fallback
 BITNET_N_GPU_LAYERS=-1          # All layers to Metal GPU
 AETHERFORGE_PORT=8765
 OPA_MODE=embedded               # No Docker needed
+SILICON_COLOSSEUM_MIN_FAITHFULNESS=0.55
+SILICON_COLOSSEUM_FAITHFULNESS_ACTION=block
 LANGFUSE_ENABLED=false          # Enable for local telemetry
 NEO4J_ENABLED=false             # Enable for X-Ray graph persistence
-OPLOРА_NIGHTLY_HOUR=3           # 3 AM nightly training
-OPLOРА_MIN_BATTERY_PCT=30       # Only train if battery > 30%
+OPLORA_NIGHTLY_HOUR=3           # 3 AM nightly training
+OPLORA_MIN_BATTERY_PCT=30       # Only train if battery > 30%
 ```
 
 ---
@@ -207,8 +220,10 @@ docker compose up -d
 ## 6. Key Features
 
 ### RAGForge
-- ChromaDB embedded vector store (no server needed)
-- Cosine similarity retrieval with configurable n_results
+- RuVector GNN-HNSW hybrid vector store (replaces ChromaDB — no server needed)
+- Hybrid semantic (70%) + BM25 keyword (30%) search with GNN reranking
+- CalcEngine: deterministic table interpolation for numeric queries
+- QueryRouter: intent classifier fires before any LLM call
 - Document ingestion via API: `POST /api/v1/ragforge/ingest`
 
 ### LocalBuddy
@@ -381,8 +396,8 @@ Located at `data/lora_checkpoints/`. Each checkpoint is:
 | Metric | Target | Typical |
 |---|---|---|
 | Backend cold start | <150 ms | ~120 ms |
-| Model load (BitNet 2B) | <8 s | ~4–6 s |
-| Inference throughput | 80–120 t/s | ~90–110 t/s |
+| Model load (Qwen2.5-7B) | <15 s | ~8–12 s |
+| Inference throughput | 60–100 t/s | ~70–90 t/s |
 | OPA evaluation latency | <5 ms | ~2–3 ms |
 | Replay buffer write | <1 ms | ~0.3 ms |
 | Nightly training (100 samples) | <5 min | ~3–4 min |
@@ -454,13 +469,14 @@ docker compose up -d  # Starts Langfuse + Neo4j + OPA server
 | Issue | Solution |
 |---|---|
 | Backend offline | Run `./run_dev.sh` or check `uvicorn` is running on 8765 |
-| Model not found | Run `./install.sh` to download BitNet model |
+| Model not found | Run `./install.sh` to download Qwen2.5-7B model |
 | OPA not found | `brew install opa` or set `OPA_MODE=embedded` (Python fallback) |
 | Metal GPU not used | Check `BITNET_N_GPU_LAYERS=-1` in .env |
 | Tests fail | `source .venv/bin/activate && pytest tests/ -v` |
 | Port 8765 in use | Change `AETHERFORGE_PORT` in .env |
 | Tauri build fails | Install Xcode CLI: `xcode-select --install` |
-| ChromaDB error | Delete `data/chroma/` and restart |
+| RuVector data corrupt | Delete `data/ruvector/` and re-ingest documents |
+| Coherence gate false positive | Adjust tolerance in `coherence_gate.py` (default: 1%) |
 
 ### Logs
 ```bash

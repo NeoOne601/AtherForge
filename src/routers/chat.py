@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, cast
 
 import structlog  # type: ignore[import-untyped]
@@ -234,13 +235,20 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                         break
 
                 if active and result.reasoning_summary:
+                    thinking_t0 = time.perf_counter()
                     for chunk in iter_stream_chunks(result.reasoning_summary):
                         try:
-                            await websocket.send_json({"type": "reasoning", "content": chunk})
+                            await websocket.send_json({"type": "thinking", "content": chunk})
                         except (WebSocketDisconnect, RuntimeError):
                             active = False
                             break
                         await asyncio.sleep(0.01)
+                    if active:
+                        thinking_ms = round((time.perf_counter() - thinking_t0) * 1000, 1)
+                        try:
+                            await websocket.send_json({"type": "thinking_complete", "duration_ms": thinking_ms})
+                        except (WebSocketDisconnect, RuntimeError):
+                            active = False
 
                 if active:
                     for chunk in iter_stream_chunks(result.answer_text or result.response):
@@ -248,7 +256,7 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                         if not clean and chunk:
                             continue
                         try:
-                            await websocket.send_json({"type": "token", "content": clean})
+                            await websocket.send_json({"type": "answer", "content": clean})
                         except (WebSocketDisconnect, RuntimeError):
                             active = False
                             break
@@ -257,6 +265,8 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                 if active:
                     done_event = result.model_dump()
                     done_event["type"] = "done"
+                    done_event["thinking"] = result.reasoning_summary or result.reasoning_trace or None
+                    done_event["thinking_duration_ms"] = result.latency_ms
                     try:
                         await websocket.send_json(done_event)
                     except (WebSocketDisconnect, RuntimeError):

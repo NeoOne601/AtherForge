@@ -60,8 +60,10 @@ class AetherForgeSettings(BaseSettings):
     # NOTE: This threshold applies to real cosine similarity scores from SAMR-lite
     # (not inflated keyword-heuristic scores). Paraphrased answers naturally score
     # 0.55–0.75 vs source chunks — 0.45 catches truly ungrounded responses only.
-    # RAGForge module bypasses hard-blocking; SAMR-lite appends visible warnings instead.
-    silicon_colosseum_min_faithfulness: float = Field(default=0.45, ge=0.0, le=1.0)
+    silicon_colosseum_min_faithfulness: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Action when faithfulness is below threshold: "block" raises FaithfulnessError,
+    # "warn" appends a warning badge (legacy, not recommended).
+    silicon_colosseum_faithfulness_action: Literal["block", "warn"] = "block"
 
     # Apple Silicon Optimized VLM (mlx-vlm)
     # Default is a placeholder; override via .env or settings.json

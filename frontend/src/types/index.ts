@@ -87,6 +87,9 @@ export interface Message {
     faithfulness_score?: number;
     reasoning_trace?: string;
     answer_text?: string;
+    thinking?: string;
+    thinkingDurationMs?: number;
+    isThinkingStreaming?: boolean;
     policy_decisions?: PolicyDecision[];
     causal_graph?: CausalGraph;
     blocked?: boolean;

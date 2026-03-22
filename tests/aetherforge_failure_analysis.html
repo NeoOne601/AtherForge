@@ -1,0 +1,287 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans)}
+.tabs{display:flex;gap:4px;border-bottom:0.5px solid var(--color-border-tertiary);margin-bottom:16px}
+.tab{padding:7px 14px;font-size:12px;border:none;background:none;cursor:pointer;color:var(--color-text-secondary);border-bottom:2px solid transparent;transition:all .15s}
+.tab.active{color:var(--color-text-primary);border-bottom-color:var(--color-text-primary)}
+.panel{display:none}.panel.active{display:block}
+.fail-card{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);margin-bottom:10px;overflow:hidden}
+.fail-header{padding:9px 12px;display:flex;align-items:center;gap:8px;background:var(--color-background-secondary);cursor:pointer}
+.fail-q{font-size:12px;font-weight:500;color:var(--color-text-primary);flex:1}
+.fail-badge{font-size:10px;padding:2px 8px;border-radius:6px;flex-shrink:0}
+.badge-crit{background:var(--color-background-danger);color:var(--color-text-danger)}
+.badge-err{background:var(--color-background-warning);color:var(--color-text-warning)}
+.fail-body{padding:12px;font-size:12px;line-height:1.65;display:none}
+.fail-body.open{display:block}
+.what-did{background:var(--color-background-danger);border-left:3px solid var(--color-text-danger);padding:8px 10px;border-radius:0 4px 4px 0;margin-bottom:8px;color:var(--color-text-primary);font-family:var(--font-mono);font-size:11px}
+.what-should{background:var(--color-background-success);border-left:3px solid var(--color-text-success);padding:8px 10px;border-radius:0 4px 4px 0;margin-bottom:8px;color:var(--color-text-primary);font-size:11px}
+.log-entry{background:var(--color-background-tertiary);border:0.5px solid var(--color-border-tertiary);border-radius:4px;padding:6px 10px;margin-bottom:6px;font-family:var(--font-mono);font-size:11px;color:var(--color-text-secondary)}
+.log-warn{border-left:3px solid #BA7517;color:var(--color-text-warning)}
+.log-err{border-left:3px solid var(--color-text-danger);color:var(--color-text-danger)}
+.log-ok{border-left:3px solid var(--color-text-success)}
+.root-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.root-card{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;background:var(--color-background-secondary)}
+.root-label{font-size:11px;font-weight:500;color:var(--color-text-tertiary);margin-bottom:4px}
+.root-val{font-size:12px;color:var(--color-text-primary);line-height:1.5}
+.fix-row{border-bottom:0.5px solid var(--color-border-tertiary);padding:10px 0;display:flex;gap:10px;align-items:flex-start}
+.fix-row:last-child{border-bottom:none}
+.fix-num{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;flex-shrink:0;margin-top:1px}
+.fix-num.p1{background:var(--color-background-danger);color:var(--color-text-danger)}
+.fix-num.p2{background:var(--color-background-warning);color:var(--color-text-warning)}
+.fix-num.p3{background:var(--color-background-info);color:var(--color-text-info)}
+.fix-title{font-size:12px;font-weight:500;color:var(--color-text-primary);margin-bottom:3px}
+.fix-desc{font-size:12px;color:var(--color-text-secondary);line-height:1.6}
+.code-block{background:var(--color-background-tertiary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;font-family:var(--font-mono);font-size:11px;line-height:1.7;margin-top:6px;color:var(--color-text-primary);overflow-x:auto}
+.kw{color:var(--color-text-info)}
+.cm{color:var(--color-text-tertiary)}
+.domain-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.domain-card{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px;background:var(--color-background-secondary)}
+.domain-icon{font-size:18px;margin-bottom:4px}
+.domain-name{font-size:12px;font-weight:500;color:var(--color-text-primary);margin-bottom:3px}
+.domain-examples{font-size:11px;color:var(--color-text-secondary);line-height:1.5}
+.chevron{font-size:10px;color:var(--color-text-tertiary);transition:transform .15s}
+</style>
+
+<div class="tabs">
+  <button class="tab active" onclick="showTab('failures')">Failures per query</button>
+  <button class="tab" onclick="showTab('logs')">Log root causes</button>
+  <button class="tab" onclick="showTab('fixes')">Priority fixes</button>
+  <button class="tab" onclick="showTab('arch')">Architecture changes</button>
+  <button class="tab" onclick="showTab('domains')">Universal design</button>
+</div>
+
+<div id="failures" class="panel active">
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f1')">
+    <span class="fail-badge badge-crit">LOOP BUG</span>
+    <span class="fail-q">Q1 — "calculate all stability particulars in salt water at 8.33m"</span>
+    <span class="chevron" id="chev-f1">▶</span>
+  </div>
+  <div class="fail-body" id="f1">
+    <div class="what-did">WHAT ÆTHER DID: Generated the sentence "Let's proceed with calculating stability particulars..." then repeated a near-identical paragraph 6 times. No calculation. No numbers. No answer.</div>
+    <div class="what-should">WHAT I WOULD DO: Classify as multi-value table lookup + interpolation. Query the structured hydrostatic table for draft 8.33m (or bracket rows 8.30 + 8.40). Run deterministic Python interpolation for each column (Displacement, TPC, MTC, KM, LCB, LCF, LCG). Format a results table. LLM only writes the explanation wrapper — never the numbers.</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px">Root cause: No query router. A "calculate all" query went straight to the LLM with vague RAG chunks, and the LLM looped because it couldn't satisfy its own generation goal ("find the data") from the context it received. Generation stopping condition was never met.</div>
+  </div>
+</div>
+
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f2')">
+    <span class="fail-badge badge-crit">HALLUCINATION</span>
+    <span class="fail-q">Q2 — "calculate displacement at draft 8.17m salt water"</span>
+    <span class="chevron" id="chev-f2">▶</span>
+  </div>
+  <div class="fail-body" id="f2">
+    <div class="what-did">WHAT ÆTHER DID: Made up "displacement 634,000 kg at 8.17m", then multiplied by 1.025 (wrong — hydrostatic table IS already salt water). Fabricated answer 647,850 kg. SAMR score 0.53.</div>
+    <div class="what-should">WHAT I WOULD DO: Step 1 — lookup_table(vessel="Primrose Ace", table="hydrostatic", draft_between=[8.10, 8.20]). Step 2 — linear_interpolate(d=8.17, d1=8.10, d2=8.20, v1=Δ₁, v2=Δ₂). Step 3 — confirm table density annotation (1.025 = salt water, no correction needed). Step 4 — verify every number against trace. Answer: 25,839 t.</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px">Root causes: (1) Tabular data wasn't extracted to structured SQLite — only text chunks existed. (2) No calculation engine — LLM was asked to compute a number from context it couldn't actually read. (3) Wrong formula applied (SG multiplication is only for fresh→salt conversion, not salt water lookup).</div>
+  </div>
+</div>
+
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f3')">
+    <span class="fail-badge badge-err">TOOL ERROR</span>
+    <span class="fail-q">Q3 — "For interpolation, re-calculate displacement in tonnes at 8.33m"</span>
+    <span class="chevron" id="chev-f3">▶</span>
+  </div>
+  <div class="fail-body" id="f3">
+    <div class="what-did">WHAT ÆTHER DID: Tried to call tool 'get_data' which doesn't exist in the registry. Error: "Attempted to execute unregistered tool [aetherforge.core.tool_registry] name=get_data". Responded with just the error message.</div>
+    <div class="what-should">WHAT I WOULD DO: The tool needed here is lookup_table (already registered) + a Python interpolation call. The LLM hallucinated a non-existent tool because it couldn't find the data another way. With a proper structured data layer, it would never need to invent tools — lookup_table would return the exact rows.</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px">Root cause: LLM invented a tool name when standard retrieval failed. No fallback logic. No retry with different tool. Tool registry needs to handle unregistered calls gracefully and suggest the correct tool.</div>
+  </div>
+</div>
+
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f4')">
+    <span class="fail-badge badge-crit">HALLUCINATION</span>
+    <span class="fail-q">Q4 — "displacement of Primrose Ace at 7.57m in fresh water"</span>
+    <span class="chevron" id="chev-f4">▶</span>
+  </div>
+  <div class="fail-body" id="f4">
+    <div class="what-did">WHAT ÆTHER DID: Claimed draft of "480088000 mm (48 meters)", displacement of "8898888998 kg", then extrapolated nonsense to get 8,898,893,557 kg. These are completely fabricated numbers with no relationship to reality. SAMR score 0.38.</div>
+    <div class="what-should">WHAT I WOULD DO: Lookup_table for draft 7.57m (between rows 7.50 and 7.60). Interpolate. Apply FW correction: Δ_FW = Δ_SW × (1.000/1.025) = Δ_SW × 0.9756. Or equivalently: Δ_FW = Δ_SW − FWA × (1 − d/Load draft). Every step traceable, no invented numbers.</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px">Root cause: BitNet 2B model is too small and undertrained for numerical reasoning. It confabulated numbers that fit a vague pattern (large number, increasing with draft) instead of admitting it couldn't find the data. SAMR caught low faithfulness (0.38) but still delivered the answer.</div>
+  </div>
+</div>
+
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f5')">
+    <span class="fail-badge badge-crit">LOOP BUG</span>
+    <span class="fail-q">Q5 — User corrects: "find displacement at 8.17m from the hydrostatic table"</span>
+    <span class="chevron" id="chev-f5">▶</span>
+  </div>
+  <div class="fail-body" id="f5">
+    <div class="what-did">WHAT ÆTHER DID: Said "approximately 2500 tons" then repeated the same sentence 13 times verbatim. Infinite repetition loop. Faithfulness notice never triggered — SAMR didn't catch the loop.</div>
+    <div class="what-should">WHAT I WOULD DO: Same as Q2. The correct answer (25,839 t) would come from the deterministic engine in under 200ms. The LLM's only job is to write one clear sentence citing the source table rows.</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px">Root cause: The model entered a degenerate generation loop when it couldn't resolve the query. No repetition detection. No max-unique-token guard. The number "2500" is also wrong by a factor of ~10 — likely a generic guess from training data about "ship displacement".</div>
+  </div>
+</div>
+
+<div class="fail-card">
+  <div class="fail-header" onclick="toggle('f6')">
+    <span class="fail-badge badge-err">GAVE UP</span>
+    <span class="fail-q">Q6 — "First check the hydrostatic tables… find displacement at 8.17m"</span>
+    <span class="chevron" id="chev-f6">▶</span>
+  </div>
+  <div class="fail-body" id="f6">
+    <div class="what-did">WHAT ÆTHER DID: Said "I can't find the data, please share the relevant sections." Asked the user to do the retrieval. Abdicated entirely.</div>
+    <div class="what-should">WHAT I WOULD DO: The document IS in the index (5,302 chunks confirmed in logs). The problem is the chunks don't contain the table data in a queryable form. With structured extraction at ingestion time, this is a 3ms SQL query. With current architecture, the answer exists in the index but is inaccessible because the table was chunked into meaningless text fragments.</div>
+  </div>
+</div>
+</div>
+
+<div id="logs" class="panel">
+<div style="font-size:12px;font-weight:500;color:var(--color-text-tertiary);margin-bottom:10px">Key signals from Atherforge_backend_log.txt</div>
+
+<div class="log-entry log-err">ERROR [aetherforge.core.tool_registry] Attempted to execute unregistered tool name=get_data<br><span style="opacity:.6">→ LLM hallucinated a tool that doesn't exist. No registry fallback.</span></div>
+
+<div class="log-entry log-warn">WARNING [aetherforge.meta_agent] JSON match failed to parse: Extra data: line 7 column 1 (char 115) - trying heuristic<br><span style="opacity:.6">→ BitNet 2B generating malformed JSON for tool calls. Heuristic parser is fragile.</span></div>
+
+<div class="log-entry log-warn">WARNING [aetherforge.ragforge.samr_lite] LOW_CONFIDENCE score=0.530 threshold=0.55 | faithfulness score: 0.53<br><span style="opacity:.6">→ SAMR detected hallucination but delivered the answer anyway. Should block, not warn.</span></div>
+
+<div class="log-entry log-warn">WARNING [aetherforge.ragforge.samr_lite] LOW_CONFIDENCE score=0.378 threshold=0.55 | faithfulness score: 0.38<br><span style="opacity:.6">→ 0.38 faithfulness = near-total confabulation. Answer should have been blocked.</span></div>
+
+<div class="log-entry log-err">INFO FTS5/BM25: 0 results for 'calculate the displacement of M.V. Primrose ace...'<br>INFO Sparse retrieval: 0 results<br>INFO Dense-only search (sparse index not loaded yet)<br><span style="opacity:.6">→ BM25 sparse index NOT WORKING at query time. Hybrid = dense-only. Critical failure.</span></div>
+
+<div class="log-entry log-err">INFO CognitiveRAG ⑥ Self-verification: FAILED ✗ (score=0.0) — rounds 1 and 2<br><span style="opacity:.6">→ Verification fails every time. The pipeline re-retrieves and gets the same 6 chunks twice. The verification loop is a no-op.</span></div>
+
+<div class="log-entry log-warn">llama_context: n_ctx_per_seq (8192) &lt; n_ctx_train (32768) — full capacity not utilized<br><span style="opacity:.6">→ Context is capped at 8192 tokens. A hydrostatic table needs ~4000 tokens. Leaves almost no room for system prompt + history + chunks.</span></div>
+
+<div class="log-entry" style="border-left:3px solid var(--color-border-secondary)">INFO model_id=bitnet-b1.58-2b path='/Volumes/Apple/AI Model/bitnet-model.gguf'<br><span style="opacity:.6">→ BitNet 1.58-bit 2B is a research model, not a production instruction-following model. Fundamentally undersized for reasoning tasks.</span></div>
+
+<div class="log-entry" style="border-left:3px solid var(--color-border-secondary)">INFO Indexed 'HA - 13 LOADING AND STABILITY INFORMATION BOOKLET.pdf' — 5302 chunks | breakdown: {'figure_caption': 6, 'section': 50, 'table': 117}<br><span style="opacity:.6">→ 117 "table" chunks exist but table structure (rows, columns, numeric values) is NOT preserved as structured data. Just text strings.</span></div>
+
+<div style="font-size:12px;color:var(--color-text-secondary);margin-top:12px;line-height:1.7">
+The 5302 chunks prove the document WAS ingested — but tabular numeric data (hydrostatic tables, KN tables, GZ curves) was serialized to flat text, destroying row/column relationships. The sparse index failed at query time (0 BM25 results), so exact-match retrieval for terms like "8.17" or "25839" never ran. Dense-only retrieval returned semantically similar chunks (text about hydrostatics) but not the actual numeric rows. The model then hallucinated numbers to fill the gap.
+</div>
+</div>
+
+<div id="fixes" class="panel">
+<div class="fix-row">
+  <div class="fix-num p1">1</div>
+  <div>
+    <div class="fix-title">Separate structured table data from text chunks</div>
+    <div class="fix-desc">At ingestion, parse every detected table into SQLite rows, not text chunks. Key tables (hydrostatic, KN, GZ, tank capacity) need column-aware extraction. The 117 "table" chunks Docling found should become 117 SQL tables or rows, not 117 text blobs.</div>
+    <div class="code-block"><span class="cm"># Instead of: chunk.text = "Draft 8.10 Displ 25551 TPC 40.53..."</span><br><span class="cm"># Do this:</span><br>db.execute(<span class="kw">"INSERT INTO hydrostatic VALUES (?, ?, ?, ?)"</span>,<br>  (vessel_id, 8.10, 25551, 40.53))</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p1">2</div>
+  <div>
+    <div class="fix-title">Replace BitNet 2B with a capable instruction model</div>
+    <div class="fix-desc">BitNet 1.58-bit is a research model for edge inference, not a production reasoning model. For calculations and structured output, minimum viable is a properly quantized 7B model (Qwen2.5-7B-Q4_K_M, phi-4-mini-Q4_K_M, or Mistral-7B). Context must be ≥16k tokens.</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p1">3</div>
+  <div>
+    <div class="fix-title">Add a deterministic calculation engine — LLM never computes numbers</div>
+    <div class="fix-desc">All arithmetic, interpolation, unit conversion, and compliance checks run as Python functions. LLM receives the trace output and writes prose around it. Block any LLM response containing numbers not found in the trace or source chunks.</div>
+    <div class="code-block"><span class="kw">def</span> linear_interpolate(d, d1, d2, v1, v2):<br>  frac = (d - d1) / (d2 - d1)<br>  <span class="kw">return</span> round(v1 + frac * (v2 - v1), 1)</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p1">4</div>
+  <div>
+    <div class="fix-title">Fix the BM25 sparse index — it was dead at query time</div>
+    <div class="fix-desc">Every query returned 0 BM25 results because the sparse index wasn't loaded. This means exact-match retrieval for terms like "8.17", "25551", "TPC" never fired. Fix the startup order — load FTS5 index before accepting queries, not concurrently with PDF ingestion.</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p1">5</div>
+  <div>
+    <div class="fix-title">SAMR must block, not warn, on score &lt; 0.5</div>
+    <div class="fix-desc">Currently SAMR appends a warning but still delivers a fabricated answer. A 0.38 faithfulness score means the answer is almost entirely hallucinated — it must be blocked and a "I cannot find that specific value in the document" message returned instead.</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p2">6</div>
+  <div>
+    <div class="fix-title">Add repetition detection to break infinite loops</div>
+    <div class="fix-desc">Detect when the last N tokens repeat a pattern and stop generation immediately. A simple approach: if any 10-token window appears 3+ times in the generation, halt and return an error message. The "2500 tons" × 13 repetitions should have been caught after the 2nd occurrence.</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p2">7</div>
+  <div>
+    <div class="fix-title">Query intent classifier before any retrieval</div>
+    <div class="fix-desc">Classify every query before routing: table_lookup / interpolate / unit_convert / compliance_check / explain / procedure. Each type routes to different handlers. "Displacement at 8.17m" is table_lookup+interpolate — it should never reach the LLM for the computation step.</div>
+  </div>
+</div>
+<div class="fix-row">
+  <div class="fix-num p3">8</div>
+  <div>
+    <div class="fix-title">Register a get_data tool (or rename lookup_table to match LLM expectation)</div>
+    <div class="fix-desc">The LLM consistently tried to call get_data. Either register that tool name as an alias for lookup_table, or fine-tune the tool selection prompt to use the actual registered tool names. Unregistered tool calls should return a suggestion, not a silent error.</div>
+  </div>
+</div>
+</div>
+
+<div id="arch" class="panel">
+<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:12px;line-height:1.65">The fundamental architectural change needed: separate the retrieval plane (what data exists) from the calculation plane (what the numbers mean) from the generation plane (how to explain it).</div>
+
+<div class="code-block">
+<span class="cm"># Current flow (broken):</span><br>
+query → vector search → text chunks → LLM → answer<br><br>
+<span class="cm"># Correct flow:</span><br>
+query → IntentClassifier<br>
+  <span class="kw">if</span> intent == "table_lookup":<br>
+    rows = db.query(<span class="kw">"SELECT * FROM hydrostatic WHERE draft BETWEEN ? AND ?"</span>)<br>
+    result = calc_engine.interpolate(rows, target_draft)<br>
+    trace = TraceRecorder.log(result)<br>
+    rag_context = vector_search(query, top_k=4)  <span class="cm"># for citations only</span><br>
+    answer = llm.format_answer(trace, rag_context)  <span class="cm"># prose only</span><br>
+    guard.verify_numbers(answer, trace)  <span class="cm"># block if numbers don't match</span><br>
+  <span class="kw">elif</span> intent == "explain":<br>
+    chunks = hybrid_search(query)<br>
+    answer = llm.generate(chunks)
+</div>
+
+<div style="font-size:12px;font-weight:500;color:var(--color-text-primary);margin:14px 0 8px">Ingestion pipeline changes needed</div>
+<div class="code-block">
+<span class="cm"># Current: all content → text chunks → vector store</span><br>
+<span class="cm"># Needed: content-type-aware routing</span><br><br>
+page_type = classifier.detect(page)  <span class="cm"># text / table / figure / curve</span><br><br>
+<span class="kw">if</span> page_type == "table":<br>
+  headers, rows = table_extractor.parse(page)  <span class="cm"># preserve columns</span><br>
+  domain = domain_detector.classify(headers)   <span class="cm"># "hydrostatic", "tank", etc.</span><br>
+  db.insert_structured(domain, headers, rows)  <span class="cm"># SQLite with typed columns</span><br>
+  chunk = summarize_for_vector(headers, rows)  <span class="cm"># also index for semantic search</span><br>
+<span class="kw">elif</span> page_type == "curve":<br>
+  points = curve_digitizer.extract(page)       <span class="cm"># GZ curve → (angle, GZ) pairs</span><br>
+  db.insert_curve(curve_type, points)<br>
+<span class="kw">else</span>:<br>
+  chunks = text_chunker.chunk(page)<br>
+  vector_store.index(chunks)
+</div>
+</div>
+
+<div id="domains" class="panel">
+<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:12px;line-height:1.65">The same pattern — tabular numerical data that requires domain-specific interpolation and calculation — appears across many fields. The architecture fix is identical in each case: extract structured data at ingestion, compute deterministically, let LLM explain.</div>
+<div class="domain-grid">
+  <div class="domain-card"><div class="domain-name">Maritime / Naval</div><div class="domain-examples">Hydrostatic tables, GZ curves, tank capacity tables, KN tables, stability criteria (IMO A.749)</div></div>
+  <div class="domain-card"><div class="domain-name">Structural engineering</div><div class="domain-examples">Load tables, beam section properties, deflection formulas, material yield strengths, bolt torque specs</div></div>
+  <div class="domain-card"><div class="domain-name">Medical / pharmacology</div><div class="domain-examples">Drug dosage tables, pediatric weight-based dosing, lab reference ranges, drug interaction lookup</div></div>
+  <div class="domain-card"><div class="domain-name">Finance / tax</div><div class="domain-examples">Tax bracket interpolation, depreciation schedules, amortization tables, interest rate lookups</div></div>
+  <div class="domain-card"><div class="domain-name">Aviation</div><div class="domain-examples">Aircraft performance charts (V-speed, runway length vs weight vs altitude), fuel burn tables, MEL lookup</div></div>
+  <div class="domain-card"><div class="domain-name">Electrical engineering</div><div class="domain-examples">Wire gauge ampacity tables, transformer nameplate ratings, cable derating factors, IEC/NEC tables</div></div>
+  <div class="domain-card"><div class="domain-name">Chemistry / materials</div><div class="domain-examples">Phase diagrams, solubility tables, reaction enthalpy, spectral lookup (NIST Webbook)</div></div>
+  <div class="domain-card"><div class="domain-name">Building / HVAC</div><div class="domain-examples">U-value tables, pipe sizing charts, duct friction charts, psychrometric calculations</div></div>
+  <div class="domain-card"><div class="domain-name">Geotechnical</div><div class="domain-examples">Soil classification tables, bearing capacity, pile load tables, groundwater interpolation</div></div>
+</div>
+<div style="font-size:12px;color:var(--color-text-secondary);margin-top:12px;line-height:1.7">In every domain: the authoritative answer lives in a table, not a paragraph. The RAG pipeline must extract those tables into structured storage, not treat them as unstructured text. Domain-specific validators (e.g. "GZ at 0° must equal 0", "dosage must not exceed max listed in table") add an extra safety layer. The LLM's role is always the same: explain the result, never compute it.</div>
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+function toggle(id) {
+  const b = document.getElementById(id);
+  const open = b.classList.toggle('open');
+  document.getElementById('chev-'+id).style.transform = open ? 'rotate(90deg)' : '';
+}
+</script>

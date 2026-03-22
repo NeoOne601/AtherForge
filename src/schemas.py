@@ -70,6 +70,8 @@ class ChatResponse(BaseModel):
     policy_decisions: list[dict[str, Any]] = Field(default_factory=list)
     causal_graph: dict[str, Any] | None = None
     faithfulness_score: float | None = None
+    thinking: str | None = None
+    thinking_duration_ms: float | None = None
     reasoning_summary: str | None = None
     reasoning_trace: str | None = None
     answer_text: str | None = None

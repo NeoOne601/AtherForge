@@ -58,11 +58,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite = "0.23"
 
 # ── RuVector Native Integration ──────────────────────────────────
-ruvector-core = "*"
-ruvllm = { version = "^2.0", default-features = false, features = ["metal"] }
-prime-radiant = "*"
-rvf-runtime = "*"
-ruvector-sona = "*"
+ruvector-core = { git = "https://github.com/ruvnet/ruvector", package = "ruvector-core" }
+ruvllm = { git = "https://github.com/ruvnet/ruvector", package = "ruvllm", features = ["metal"] }
+prime-radiant = { git = "https://github.com/ruvnet/ruvector", package = "prime-radiant" }
+rvf-runtime = { git = "https://github.com/ruvnet/ruvector", package = "rvf-runtime" }
+ruvector-sona = { git = "https://github.com/ruvnet/ruvector", package = "ruvector-sona" }
 
 [profile.release]
 # Aggressively optimize for size and speed on M1

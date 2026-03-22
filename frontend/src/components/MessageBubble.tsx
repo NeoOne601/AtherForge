@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { Message } from "../types";
 import { md } from "../lib/markdown";
+import { ThinkingBlock } from "./ThinkingBlock";
 
 /**
  * Parse <think>...</think> blocks from AI response text.
@@ -49,9 +50,13 @@ interface MessageBubbleProps {
     msg: Message;
     showThinking?: boolean;
     onSuggestionClick?: (suggestion: string) => void;
+    onSuggestionSubmit?: (suggestion: string) => void;
+    isLatestMessage?: boolean;
+    isStreaming?: boolean;
 }
 
-export function MessageBubble({ msg, showThinking = true, onSuggestionClick }: MessageBubbleProps) {
+export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onSuggestionSubmit, isLatestMessage, isStreaming }: MessageBubbleProps) {
+    const [suggestionsSubmitted, setSuggestionsSubmitted] = useState(false);
     const isUser = msg.role === "user";
     const fScore = msg.faithfulness_score;
 
@@ -60,9 +65,19 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick }: M
 
     if (!isUser) {
         const parsed = parseThinking(msg.content);
-        thinking = msg.reasoning_trace ?? parsed.thinking;
+        thinking = msg.thinking ?? msg.reasoning_trace ?? parsed.thinking;
         answer = msg.answer_text ?? parsed.answer;
     }
+
+    const handleSuggestionClick = (suggestion: string) => {
+        if (suggestionsSubmitted || isStreaming) return;
+        if (onSuggestionSubmit) {
+            setSuggestionsSubmitted(true);
+            onSuggestionSubmit(suggestion);
+        } else {
+            onSuggestionClick?.(suggestion);
+        }
+    };
 
     // Extract attachments
     const { cleanedAnswer, attachments } = parseAttachments(answer);
@@ -77,17 +92,13 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick }: M
                 {isUser ? "You" : "Æ"}
             </div>
             <div className={`bubble ${isUser ? "user-bubble" : "ai"}`}>
-                {/* Thinking section (collapsible) */}
+                {/* Thinking section (collapsible ThinkingBlock) */}
                 {!isUser && thinking && showThinking && (
-                    <details className="thinking-section" open={msg.streaming ? true : undefined}>
-                        <summary className="thinking-summary">
-                            {msg.streaming ? "🧠 Reasoning..." : "🧠 Reasoning trace"}
-                        </summary>
-                        <div
-                            className="thinking-content markdown-body"
-                            dangerouslySetInnerHTML={{ __html: md.render(thinking) }}
-                        />
-                    </details>
+                    <ThinkingBlock
+                        content={thinking}
+                        durationMs={msg.thinkingDurationMs}
+                        isStreaming={msg.isThinkingStreaming}
+                    />
                 )}
 
                 {/* Main answer */}
@@ -178,16 +189,19 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick }: M
                     </details>
                 )}
 
-                {!isUser && suggestions.length > 0 && (
+                {!isUser && suggestions.length > 0 && !suggestionsSubmitted && (
                     <div style={{ marginTop: "12px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
                         {suggestions.map((suggestion) => (
                             <button
                                 key={suggestion}
                                 type="button"
                                 className="chip"
-                                onClick={() => onSuggestionClick?.(suggestion)}
+                                style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                                onClick={() => handleSuggestionClick(suggestion)}
+                                disabled={isStreaming}
                             >
-                                {suggestion}
+                                <span>{suggestion}</span>
+                                <span style={{ fontSize: "11px", opacity: 0.5, transition: "opacity 0.15s" }}>↗</span>
                             </button>
                         ))}
                     </div>

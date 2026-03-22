@@ -1,84 +1,136 @@
 # AetherForge v1.0 — src/core/query_router.py
 # ─────────────────────────────────────────────────────────────────
-# Semantic Query Router (Tiny Dancer FastGRNN)
-# 
-# Replaces the expensive ~200 token LLM intent classifier with a
-# <1ms neural router. It accurately catches numeric/tabular
-# calculation intents (table_lookup) to completely bypass the LLM
-# and invoke deterministic calc_engine functions.
+# Deterministic Query Router
+#
+# Pure keyword + regex routing — no subprocess, no LLM, no network.
+# Classifies queries BEFORE any LLM invocation so calculation
+# queries bypass the LLM entirely and go to the CalcEngine.
+#
+# Routes:
+#   TABLE_LOOKUP     → single-column interpolation (e.g. "displacement at 8.17m")
+#   MULTI_LOOKUP     → all columns at one draft
+#   INTERPOLATE      → explicit interpolation request
+#   UNIT_CONVERT     → FW/dock-water density correction
+#   EXPLAIN          → conceptual question (→ RAG)
+#   PROCEDURE        → procedural question (→ RAG)
+#   SYNTHESIS        → default full RAG pipeline
 # ─────────────────────────────────────────────────────────────────
+from __future__ import annotations
+
+import re
+from enum import Enum
+from typing import Optional
+
 import structlog
-from typing import Any, Optional
-
-import subprocess
-import json
-
-class SemanticRouter:
-    def __init__(self):
-        self.routes = {}
-        
-    def add_route(self, name, examples):
-        self.routes[name] = examples
-        
-    async def route(self, query: str) -> str:
-        q_lower = query.lower()
-        try:
-            # Synchronous subprocess call wrapped for async workflow
-            # We construct a simplified routing command for the CLI
-            # Ideally, RuVector CLI takes the routes as JSON payload or config
-            # As a bridge, we invoke npx ruvector route classify
-            proc = subprocess.run(
-                ["npx", "--yes", "ruvector", "route", "classify", query],
-                capture_output=True, text=True, check=True
-            )
-            output = proc.stdout.strip()
-            # Determine route from stdout text, with fallback to rules
-            if "table_lookup" in output.lower():
-                return "table_lookup"
-            elif "explain" in output.lower():
-                return "explain"
-                
-        except Exception as e:
-            logger.error(f"Tiny Dancer subprocess failed: {e}")
-            
-        # Graceful fallback logic 
-        if "displacement" in q_lower or "tpc" in q_lower or "draft" in q_lower or "calculate" in q_lower:
-            return "table_lookup"
-        return "explain"
-        
-_ROUTER_AVAILABLE = True
 
 logger = structlog.get_logger("aetherforge.core.query_router")
 
-class AetherRouter:
-    def __init__(self):
-        self.router = SemanticRouter()
-        
-        # Route 1: Deterministic tabular math
-        self.router.add_route("table_lookup", examples=[
-            "what is the displacement at 8.17m",
-            "TPC at draft 7.5",
-            "calculate the MTc when draft is 4.2",
-            "displacement of M.V. Primrose ace in salt water at draft of 8.17m",
-            "what is the km for draft 9.0",
-        ])
-        
-        # Route 2: Standard RAG (Facts, Definitions, Concepts)
-        self.router.add_route("explain", examples=[
-            "what does GM mean",
-            "explain free surface effect",
-            "summarize chapter 4",
-            "how do I operate the fire pump",
-            "compare vessel A to vessel B",
-        ])
+# ── Draft extractor ──────────────────────────────────────────────
+_DRAFT_RE = re.compile(
+    r'\b(\d+\.\d{1,3})\s*(?:m\b|metres?\b|meters?\b)',
+    re.IGNORECASE,
+)
 
-    async def route_query(self, query: str) -> str:
-        """
-        Takes the raw user query and routes it. 
-        Returns 'table_lookup', 'explain', etc.
-        """
-        route_name = await self.router.route(query)
-        logger.info(f"Tiny Dancer routed query to: '{route_name}'")
-        return route_name
 
-router_instance = AetherRouter()
+class QueryRoute(str, Enum):
+    TABLE_LOOKUP = "table_lookup"
+    MULTI_LOOKUP = "multi_lookup"
+    INTERPOLATE = "interpolate"
+    UNIT_CONVERT = "unit_convert"
+    EXPLAIN = "explain"
+    PROCEDURE = "procedure"
+    SYNTHESIS = "synthesis"
+
+
+# ── Keyword sets ─────────────────────────────────────────────────
+_CALC_KEYWORDS = frozenset([
+    "displacement", "tpc", "tonnes per cm", "mtc", "moment to change",
+    "km", "lcb", "lcf", "deadweight",
+])
+_CONVERT_KEYWORDS = frozenset([
+    "fresh water", "dock water", "fw", "dw", "density", "rd", "sg",
+    "relative density", "specific gravity",
+])
+_ALL_PARTICULARS = frozenset([
+    "all particulars", "all stability", "all hydrostatic",
+    "stability particulars", "hydrostatic data", "hydrostatic particulars",
+])
+_EXPLAIN_KEYWORDS = frozenset([
+    "what is", "what does", "explain", "define", "meaning of",
+    "describe", "difference between", "why is", "concept",
+])
+_PROCEDURE_KEYWORDS = frozenset([
+    "how do i", "how to", "procedure", "steps to", "process for",
+    "operate", "instructions",
+])
+
+
+def route_query(query: str) -> QueryRoute:
+    """
+    Classify a user query into a route. Pure function — no I/O, no subprocess.
+    Called BEFORE any LLM invocation.
+    """
+    q = query.lower().strip()
+    has_draft = bool(_DRAFT_RE.search(query))
+    has_calc = any(kw in q for kw in _CALC_KEYWORDS)
+    has_conv = any(kw in q for kw in _CONVERT_KEYWORDS)
+    has_all = any(kw in q for kw in _ALL_PARTICULARS)
+    has_expl = any(kw in q for kw in _EXPLAIN_KEYWORDS)
+    has_proc = any(kw in q for kw in _PROCEDURE_KEYWORDS)
+
+    # Conversion queries (fresh water / dock water)
+    if has_draft and has_conv:
+        return QueryRoute.UNIT_CONVERT
+    if has_conv and not has_expl:
+        return QueryRoute.UNIT_CONVERT
+
+    # All stability particulars at one draft
+    if has_draft and has_all:
+        return QueryRoute.MULTI_LOOKUP
+
+    # Explicit interpolation request
+    if has_draft and "interpolat" in q:
+        return QueryRoute.INTERPOLATE
+
+    # Single column table lookup
+    if has_draft and has_calc:
+        return QueryRoute.TABLE_LOOKUP
+
+    # Explanation requests (no draft number = conceptual question)
+    if has_expl and not has_draft:
+        return QueryRoute.EXPLAIN
+
+    # Procedure requests
+    if has_proc:
+        return QueryRoute.PROCEDURE
+
+    # Default: full RAG pipeline
+    return QueryRoute.SYNTHESIS
+
+
+def extract_draft(query: str) -> Optional[float]:
+    """Extract draft value in metres from a query string."""
+    m = _DRAFT_RE.search(query)
+    return float(m.group(1)) if m else None
+
+
+def extract_column(query: str) -> str:
+    """Extract which hydrostatic column is being asked for. Default: displacement."""
+    q = query.lower()
+    if "tpc" in q or "tonnes per cm" in q:
+        return "tpc"
+    if "mtc" in q or "moment to change trim" in q:
+        return "mtc"
+    if " km" in q or "km " in q:
+        return "km"
+    if "lcb" in q:
+        return "lcb"
+    if "lcf" in q:
+        return "lcf"
+    return "displacement"  # default
+
+
+def extract_sg(query: str) -> Optional[float]:
+    """Extract specific gravity (RD/SG) from a query string."""
+    m = re.search(r'(?:rd|sg)\s*[=:]?\s*(\d+\.\d+)', query, re.IGNORECASE)
+    return float(m.group(1)) if m else None

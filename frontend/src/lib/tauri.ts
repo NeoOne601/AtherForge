@@ -159,7 +159,10 @@ export async function sendChat(req: ChatRequest): Promise<ChatResponse> {
 
 export type StreamChunk =
     | { type: "meta"; session_id: string; module: string }
+    | { type: "thinking"; content: string }
+    | { type: "thinking_complete"; duration_ms: number }
     | { type: "reasoning"; content: string }
+    | { type: "answer"; content: string }
     | { type: "token"; content: string }
     | { type: "tool_start"; name: string; args: Record<string, unknown> }
     | { type: "tool_result"; name: string; result: string }
@@ -173,6 +176,8 @@ export type StreamChunk =
         causal_graph: CausalGraph | null;
         tool_calls: ToolCall[];
         response: string;
+        thinking: string | null;
+        thinking_duration_ms: number | null;
         reasoning_summary: string | null;
         reasoning_trace: string | null;
         answer_text: string | null;
