@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
+use ruvector_sona::{SonaEngine, SonaConfig};
 
 // ── State ───────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ use tokio::sync::Mutex;
 pub struct LLMState {
     pub model_path: String,
     pub initialized: bool,
+    pub sona_engine: Option<Arc<Mutex<SonaEngine>>>,
     // When ruvllm crate is available, this holds: Arc<Mutex<RuvLLM>>
     // For now, we forward to the Python FastAPI backend's existing inference.
 }
@@ -78,6 +80,14 @@ pub async fn llm_generate(
     // let result = llm.chat(messages, opts)
     //     .await
     //     .map_err(|e| format!("ruvllm error: {e}"))?;
+    //
+    // // ── SONA Integration ──────────────────────────────────────
+    // // Apply real-time MicroLoRA weight adjustments based on the 
+    // // generated inference trajectory.
+    // if let Some(sona) = &state.sona_engine {
+    //     let mut engine = sona.lock().await;
+    //     let _ = engine.apply_micro_lora(&mut *llm, &result.content);
+    // }
     //
     // Ok(GenerateResponse {
     //     text: result.content,
@@ -144,5 +154,6 @@ pub fn init_llm(model_path: &str) -> LLMState {
     LLMState {
         model_path: model_path.to_string(),
         initialized: false, // Set to true when ruvllm crate compiles
+        sona_engine: Some(Arc::new(Mutex::new(SonaEngine::new(SonaConfig::default())))),
     }
 }

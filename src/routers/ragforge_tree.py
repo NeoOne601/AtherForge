@@ -40,15 +40,12 @@ async def get_document_tree(source_name: str, request: Request) -> JSONResponse:
     }
     """
     state = request.app.state.app_state
-    vector_store = state.vector_store
+    sparse_index = state.sparse_index
 
     try:
-        # Fetch all chunks for this source with HTI metadata
-        results = vector_store.get(
-            where={"source": source_name},
-            include=["metadatas"],
-        )
-        metadatas: list[dict[str, Any]] = results.get("metadatas", [])
+        # Fetch all chunks for this source with HTI metadata via SQLite FTS
+        docs = sparse_index.get_chunks_by_source(source_name)
+        metadatas: list[dict[str, Any]] = [doc.metadata for doc in docs]
 
         if not metadatas:
             return JSONResponse({"source": source_name, "tree": [], "total_chunks": 0})
@@ -132,72 +129,138 @@ async def get_document_graph(source_name: str, request: Request) -> JSONResponse
     Simulates @ruvector/graph-node traversing SONA clustered patterns.
     """
     state = request.app.state.app_state
-    vector_store = state.vector_store
+    sparse_index = state.sparse_index
 
     try:
-        results = vector_store.get(
-            where={"source": source_name},
-            include=["metadatas"],
-        )
-        metadatas: list[dict[str, Any]] = results.get("metadatas", [])
-        if not metadatas:
-            return JSONResponse({"nodes": [], "edges": []})
+        docs = sparse_index.get_chunks_by_source(source_name)
+        metadatas: list[dict[str, Any]] = [doc.metadata for doc in docs]
+        palette = [
+            {"bg": "#e0e7ff", "text": "#3730a3", "border": "#818cf8"}, # Indigo
+            {"bg": "#dcfce7", "text": "#166534", "border": "#4ade80"}, # Green
+            {"bg": "#ffedd5", "text": "#9a3412", "border": "#fb923c"}, # Orange
+            {"bg": "#f3e8ff", "text": "#5b21b6", "border": "#c084fc"}, # Purple
+            {"bg": "#cffafe", "text": "#155e75", "border": "#22d3ee"}, # Cyan
+            {"bg": "#fce7f3", "text": "#86198f", "border": "#f472b6"}, # Fuchsia
+            {"bg": "#fef3c7", "text": "#c2410c", "border": "#fbbf24"}, # Amber
+            {"bg": "#ecfdf5", "text": "#065f46", "border": "#34d399"}  # Emerald
+        ]
+
+        sections: dict[str, list[dict]] = {}
+        for meta in metadatas[:150]:  # Limit to 150 to keep graph sane
+            sec = meta.get("section", "Unknown")
+            if sec not in sections:
+                sections[sec] = []
+            sections[sec].append(meta)
 
         nodes = []
         edges = []
-        section_clusters = set()
 
-        # Root node
+        cluster_x = 350
+        chunk_x = 700
+        current_y = 50
+
+        for c_idx, (section, sec_metas) in enumerate(sections.items()):
+            cluster_id = f"cluster_{c_idx}"
+            color = palette[c_idx % len(palette)]
+            
+            start_y = current_y
+            max_y_in_cluster = start_y
+            
+            # Add Chunks first to calculate vertical span
+            for idx, meta in enumerate(sec_metas):
+                chunk_id = meta.get("chunk_id", f"chunk_{c_idx}_{idx}")
+                
+                # Distribute horizontally in a 3-column grid to reduce vertical scroll
+                cols = 3
+                col = idx % cols
+                row = idx // cols
+                
+                node_x = chunk_x + (col * 220)
+                node_y = start_y + (row * 70)
+                max_y_in_cluster = max(max_y_in_cluster, node_y)
+                
+                nodes.append({
+                    "id": chunk_id,
+                    "data": {"label": f"Chunk {idx}\nType: {meta.get('chunk_type', 'text')}"},
+                    "position": {"x": node_x, "y": node_y},
+                    "style": {
+                        "background": "#ffffff", 
+                        "color": color["text"],
+                        "fontSize": "10px", 
+                        "padding": "4px", 
+                        "borderRadius": "4px",
+                        "border": f"2px solid {color['border']}",
+                        "width": 180
+                    }
+                })
+
+                # Edge from cluster to chunk
+                edges.append({
+                    "id": f"e_cl_{cluster_id}_{chunk_id}",
+                    "source": cluster_id,
+                    "target": chunk_id,
+                    "type": "smoothstep",
+                    "style": {"stroke": color["border"]}
+                })
+                
+                # Sequential coherence edge inside cluster
+                if idx > 0:
+                    prev_chunk = sec_metas[idx - 1].get("chunk_id", f"chunk_{c_idx}_{idx - 1}")
+                    edges.append({
+                        "id": f"e_seq_{prev_chunk}_{chunk_id}",
+                        "source": prev_chunk,
+                        "target": chunk_id,
+                        "type": "straight",
+                        "style": {"stroke": color["border"], "strokeDasharray": "5,5"}
+                    })
+
+            current_y = max_y_in_cluster + 80 # space after the last row of chunks
+
+            # Add Cluster Node aligned to the vertical center of its chunks
+            cluster_y = start_y + ((max_y_in_cluster - start_y) / 2)
+            
+            nodes.append({
+                "id": cluster_id,
+                "data": {"label": f"Section: {section[:30]}...", "type": "cluster"},
+                "position": {"x": cluster_x, "y": cluster_y},
+                "type": "default",
+                "style": {
+                    "background": color["bg"], 
+                    "color": color["text"],
+                    "border": f"2px solid {color['border']}", 
+                    "borderRadius": "8px",
+                    "padding": "10px",
+                    "width": 220
+                }
+            })
+            
+            # Edge from root to cluster
+            edges.append({
+                "id": f"e_root_{cluster_id}", 
+                "source": "root", 
+                "target": cluster_id, 
+                "animated": True, 
+                "type": "smoothstep",
+                "style": {"stroke": "#94a3b8", "strokeWidth": 2}
+            })
+
+            current_y += 50 # padding between sections
+
+        # Add Root node centered vertically
         nodes.append({
             "id": "root", 
             "data": {"label": source_name, "type": "document"}, 
-            "position": {"x": 250, "y": 0},
+            "position": {"x": 50, "y": (current_y - 50) / 2},
             "type": "default",
-            "style": {"background": "#e0e7ff", "border": "1px solid #c7d2fe", "borderRadius": "8px", "padding": "10px"}
+            "style": {
+                "background": "#f8fafc", 
+                "color": "#0f172a",
+                "border": "3px solid #cbd5e1", 
+                "borderRadius": "8px", 
+                "padding": "16px",
+                "fontWeight": "bold"
+            }
         })
-
-        y_offset = 100
-        for i, meta in enumerate(metadatas[:150]):  # Limit to 150 chunks to prevent huge browser graphs
-            chunk_id = meta.get("chunk_id", f"chunk_{i}")
-            section = meta.get("section", "Unknown")
-            cluster_id = f"cluster_{hash(section) % 10000}"
-
-            # Create SONA Pattern Cluster (Parent Node) if not exists
-            if cluster_id not in section_clusters:
-                section_clusters.add(cluster_id)
-                nodes.append({
-                    "id": cluster_id,
-                    "data": {"label": f"Cluster: {section[:30]}...", "type": "cluster"},
-                    "position": {"x": (len(section_clusters) % 3) * 300, "y": y_offset},
-                    "type": "default",
-                    "style": {"background": "rgba(99, 102, 241, 0.1)", "border": "2px dashed #6366f1", "width": 250, "height": 150}
-                })
-                edges.append({"id": f"e_root_{cluster_id}", "source": "root", "target": cluster_id, "animated": True})
-                y_offset += 200
-
-            # Add Chunk Node inside the cluster
-            # ReactFlow uses parentNode for sub-nodes
-            node_x = 20 + ((i % 2) * 110)
-            node_y = 40 + ((i % 2) * 50)
-            nodes.append({
-                "id": chunk_id,
-                "data": {"label": f"Chunk {i}\nType: {meta.get('chunk_type', 'text')}"},
-                "position": {"x": node_x, "y": node_y},
-                "parentNode": cluster_id,
-                "extent": "parent",
-                "style": {"background": "#ffffff", "fontSize": "10px", "padding": "4px", "borderRadius": "4px"}
-            })
-
-            # Sequential coherence edge (Link to previous chunk if in same section)
-            if i > 0 and metadatas[i-1].get("section") == section:
-                prev_chunk = metadatas[i-1].get("chunk_id", f"chunk_{i-1}")
-                edges.append({
-                    "id": f"e_seq_{prev_chunk}_{chunk_id}",
-                    "source": prev_chunk,
-                    "target": chunk_id,
-                    "type": "straight",
-                    "style": {"stroke": "#94a3b8"}
-                })
 
         return JSONResponse({"nodes": nodes, "edges": edges})
     except Exception as e:
@@ -213,19 +276,15 @@ async def get_section_chunks(
     Used by the frontend tree browser when a user clicks into a section.
     """
     state = request.app.state.app_state
-    vector_store = state.vector_store
+    sparse_index = state.sparse_index
 
     try:
-        results = vector_store.get(
-            where={"$and": [{"source": source_name}, {"section_id": section_id}]},
-            include=["documents", "metadatas"],
-        )
-        docs = results.get("documents", [])
-        metas = results.get("metadatas", [])
-
+        all_docs = sparse_index.get_chunks_by_source(source_name)
+        
         chunks = [
-            {"text": text, "meta": meta}
-            for text, meta in zip(docs, metas)
+            {"text": doc.page_content, "meta": doc.metadata}
+            for doc in all_docs
+            if doc.metadata.get("section_id") == section_id
         ]
 
         return JSONResponse({

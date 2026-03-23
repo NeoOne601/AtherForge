@@ -119,22 +119,27 @@ async def get_chat_models(fastapi_request: Request):
     """Return available local chat models."""
     state = fastapi_request.app.state.app_state
     models = [
-        {"id": "bitnet-b1.58-2b", "name": "BitNet b1.58 (2B)"},
-        {"id": "gemma-2b", "name": "Gemma 1.1 (2B)"},
+        {"id": "qwen-2.5-7b", "name": "Qwen 2.5 (7B Instruct)"},
         {"id": "llama-3-8b", "name": "Llama 3 (8B)"},
+        {"id": "bitnet-b1.58-2b", "name": "BitNet b1.58 (2B)"},
+        {"id": "mixtral-8x7b", "name": "Mixtral 8x7B"},
     ]
-    current = getattr(state, "selected_chat_model", "bitnet-b1.58-2b")
-    return {"models": models, "selected": current}
+    
+    current = getattr(state, "selected_chat_model", "qwen-2.5-7b")
+    
+    return JSONResponse({
+        "models": models,
+        "current": current
+    })
 
 
-@router.post("/chat-model-select")
-async def select_chat_model(
-    payload: dict,  # type: ignore[type-arg]
-    fastapi_request: Request,
-):
+class ModelSelectionPayload(BaseModel):
+    model_id: str
+
+@router.post("/chat/model")
+async def update_chat_model(payload: ModelSelectionPayload, state: AppState = Depends(get_app_state)):
     """Switch the active chat model and persist the runtime selection."""
-    state = fastapi_request.app.state.app_state
-    model_id = payload.get("model_id", "bitnet-b1.58-2b")
+    model_id = payload.model_id
     ok = await state.meta_agent.switch_model(model_id)
     if not ok:
         raise HTTPException(status_code=400, detail=f"Could not activate chat model '{model_id}'.")

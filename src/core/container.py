@@ -119,7 +119,7 @@ class Container:
         # Persisted runtime selections
         saved_settings = load_saved_settings()
         app_state.selected_chat_model = str(
-            saved_settings.get("SELECTED_CHAT_MODEL", "bitnet-b1.58-2b")
+            saved_settings.get("SELECTED_CHAT_MODEL", "qwen-2.5-7b")
         )
         app_state.selected_vlm_id = str(saved_settings.get("SELECTED_VLM_ID", "smolvlm-256m"))
         meta_agent.selected_chat_model = app_state.selected_chat_model

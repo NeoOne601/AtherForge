@@ -36,11 +36,11 @@ class AetherForgeSettings(BaseSettings):
     aetherforge_port: int = Field(default=8765, ge=1024, le=65535)
     aetherforge_log_level: Literal["debug", "info", "warning", "error"] = "info"
 
-    # ── BitNet Model ──────────────────────────────────────────────
-    # microsoft/bitnet-b1.58-2b-4t is the default model.
+    # ── LLM Model ─────────────────────────────────────────────────
+    # Qwen2.5-7B-Instruct-Q4_K_M is the default model.
     # n_gpu_layers=-1 → offload all layers to Metal GPU on M1.
-    # n_ctx=4096 → context window: 4k tokens, balanced speed/quality.
-    bitnet_model_path: Path = Path("./models/bitnet-b1.58-2b-4t.gguf")
+    # n_ctx=16384 → context window for reasoning.
+    bitnet_model_path: Path = Path("./models/qwen2.5-7b-instruct-q4_k_m.gguf")
     bitnet_n_ctx: int = Field(default=8192, ge=512, le=32768)
     bitnet_n_gpu_layers: int = Field(default=-1, ge=-1)  # -1 = all
     bitnet_n_threads: int = Field(default=8, ge=1, le=64)

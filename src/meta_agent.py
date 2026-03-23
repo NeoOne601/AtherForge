@@ -498,8 +498,8 @@ class MetaAgent:
         self._llm: Any = None
         # Use asyncio.Lock for async-safe model switching, threading.Lock for sync inference
         self._lock: asyncio.Lock = asyncio.Lock()
-        self.model_id: str = "bitnet-b1.58-2b"  # Default model ID
-        self.selected_chat_model: str = "bitnet-b1.58-2b"
+        self.model_id: str = "qwen-2.5-7b"  # Default model ID
+        self.selected_chat_model: str = "qwen-2.5-7b"
         self._sync_lock: threading.Lock = threading.Lock()
         self._session_memories: collections.OrderedDict[str, list[Any]] = collections.OrderedDict()
         self._session_vfs: dict[str, Any] = {}
@@ -613,6 +613,11 @@ class MetaAgent:
     # We maintain a registry of supported models to ensure plug-and-play
     # consistency and optimized parameters per model.
     _MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+        "qwen-2.5-7b": {
+            "repo": None,
+            "file": "qwen2.5-7b-instruct-q4_k_m.gguf",
+            "params": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.1},
+        },
         "bitnet-b1.58-2b": {
             "repo": None,
             "file": "bitnet-b1.58-2b-4t.gguf",
@@ -661,7 +666,7 @@ class MetaAgent:
             self._llm = MockLLM()
             return
 
-        model_id = getattr(self, "selected_chat_model", "bitnet-b1.58-2b")
+        model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
         logger.info("Initializing LLM from registry", model_id=model_id, path=str(model_path))
 
         def _load() -> Any:
@@ -880,8 +885,8 @@ class MetaAgent:
                 pruned_messages.pop(1) # type: ignore
 
         # ── Registry-Aware Parameters ──────────────────────────
-        model_id = getattr(self, "selected_chat_model", "bitnet-b1.58-2b")
-        registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["bitnet-b1.58-2b"])
+        model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
+        registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["qwen-2.5-7b"])
         registry_params = registry_config.get("params", {})
 
         prompt = _messages_to_prompt(pruned_messages)
@@ -2671,8 +2676,8 @@ class MetaAgent:
                 compiled_grammar = self._compile_grammar(grammar)
                 
                 # ── Registry-Aware Parameters (Streaming) ─────────
-                model_id = getattr(self, "selected_chat_model", "bitnet-b1.58-2b")
-                registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["bitnet-b1.58-2b"])
+                model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
+                registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["qwen-2.5-7b"])
                 registry_params = registry_config.get("params", {})
 
                 with self._sync_lock:
