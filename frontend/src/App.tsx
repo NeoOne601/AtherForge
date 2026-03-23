@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import "./index.css";
 import { Module, SessionSummary, StoredMessage, MODULES } from "./types";
 import { ChatPanel } from "./components/ChatPanel";
-import { XRayPanel } from "./components/Panels/XRayPanel";
+import XRayGraph from "./components/XRayGraph";
 import { InsightsPanel } from "./components/Panels/InsightsPanel";
 import { PoliciesPanel } from "./components/Panels/PoliciesPanel";
 import { SyncPanel } from "./components/Panels/SyncPanel";
@@ -13,6 +13,7 @@ export default function App() {
     const [activeModule, setActiveModule] = useState("localbuddy");
     const [activePanel, setActivePanel] = useState<"chat" | "insights" | "policies" | "sync" | "settings">("chat");
     const [xrayOpen, setXrayOpen] = useState(false);
+    const [xrayGraph, setXrayGraph] = useState<any>(null);
     const [online, setOnline] = useState(false);
     const [cpuPct, setCpuPct] = useState<number | null>(null);
     const [visualTheme, setVisualTheme] = useState("Sovereign Dark");
@@ -354,7 +355,7 @@ export default function App() {
                     {activePanel === "chat" && activeModule !== "logger" && <ChatPanel
                         module={activeModule}
                         xray={xrayOpen}
-                        onXrayData={() => { }}
+                        onXrayData={setXrayGraph}
                         sessionId={activeSessionIds[activeModule]}
                         preloadedMessages={loadedSessionMessages}
                         onSessionCreated={(id) => {
@@ -379,7 +380,11 @@ export default function App() {
                     {activePanel === "settings" && <SettingsPanel />}
                 </main>
 
-                {xrayOpen && <XRayPanel />}
+                {xrayOpen && (
+                    <aside className="xray-sidebar overflow-hidden border-l border-white/5 bg-[#020408]/80 backdrop-blur-xl" style={{ width: 400 }}>
+                        <XRayGraph graph={xrayGraph} onClose={() => setXrayOpen(false)} />
+                    </aside>
+                )}
             </div>
         </div>
     );

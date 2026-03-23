@@ -217,7 +217,7 @@ On every startup, AetherForge runs a **Boot-Sweep** that cross-references the `d
 
 ### User Interface (Tauri Desktop)
 - **ThinkingBlock**: Collapsible `<think>` tag display showing the LLM's chain-of-thought reasoning
-- **X-Ray Mode**: Real-time causal graph of every node visited during reasoning
+- **X-Ray Mode**: Interactive vertical side-panel rendering the real-time causal graph of every decision step
 - **TuneLab**: Learning monitor showing OPLoRA/SONA statistics
 - **Session Management**: Persistent encrypted chat histories with export to PDF/Markdown
 - **Module Panels**: Separate views for RAGForge, Analytics, StreamSync, WatchTower
@@ -348,4 +348,4 @@ Key environment variables (`.env`):
 ---
 
 MIT License | Built for the Era of Sovereign Intelligence.
-*Runs on your Mac. Learns from your context. Forgets nothing important.*
+*Runs on your Mac. Learns from your context. Forgets nothing important. No loops, no leaks.*

@@ -144,7 +144,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Scheduler
     state.scheduler = AsyncIOScheduler()
     state.scheduler.add_job(
-        _nightly_oplora_job, CronTrigger(hour=3), args=[app], id="nightly_oplora"
+        _nightly_oplora_job, 
+        CronTrigger(hour=settings.oplora_nightly_hour, minute=settings.oplora_nightly_minute), 
+        args=[app], 
+        id="nightly_oplora"
     )
     # Retry skipped VLM enrichment every 5 minutes
     state.scheduler.add_job(

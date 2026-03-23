@@ -8,10 +8,14 @@
 # Tier 3: ReasoningBank — stores successful query→answer trajectories
 #
 # OPLoRA nightly runs continue unchanged. SONA supplements, not replaces.
+#
+# Detection: Checks for the ruvector CLI binary with SONA support.
+# If the CLI is available and supports `sona --status`, SONA is active.
 # ─────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -31,28 +35,41 @@ class SONAAdapter:
 
     def __init__(self, model_path: str, data_dir: str):
         self.data_dir = Path(data_dir)
-        self._sona: Any = None
         self._model_path = model_path
         self._initialized = False
+        self._cli_available = False
 
     async def initialize(self) -> None:
-        """Initialize SONA. Called at startup. Fails gracefully if unavailable."""
+        """Initialize SONA via ruvector CLI. Fails gracefully if unavailable."""
         try:
-            from ruvector_sona import SONA  # type: ignore
-
-            self._sona = SONA(
-                model_path=self._model_path,
-                micro_lora_rank=2,        # <1ms per-request adaptation
-                ewc_lambda=400,           # catastrophic forgetting protection
-                reasoning_bank=True,      # trajectory curriculum memory
-                checkpoint_dir=str(self.data_dir / "sona_checkpoints"),
+            # Check if ruvector CLI exists and has SONA support
+            result = subprocess.run(
+                ["npx", "--yes", "ruvector", "sona", "--status"],
+                capture_output=True, text=True, timeout=15,
             )
-            self._initialized = True
-            logger.info("SONA adapter initialised")
-        except ImportError:
+            if result.returncode == 0:
+                self._cli_available = True
+                self._initialized = True
+                logger.info(
+                    "SONA adapter initialized via ruvector CLI — "
+                    "3-tier real-time learning active"
+                )
+            else:
+                logger.info(
+                    "ruvector SONA not available (CLI returned non-zero) — "
+                    "SONA learning disabled, will use OPLoRA nightly batch only"
+                )
+                self._initialized = False
+        except FileNotFoundError:
             logger.info(
-                "ruvector-sona not installed — SONA learning disabled, "
-                "will use OPLoRA nightly batch only"
+                "ruvector CLI not found — "
+                "SONA learning disabled, will use OPLoRA nightly batch only"
+            )
+            self._initialized = False
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ruvector SONA status check timed out — "
+                "SONA learning disabled, will use OPLoRA nightly batch only"
             )
             self._initialized = False
         except Exception as e:
@@ -72,32 +89,42 @@ class SONAAdapter:
         verdict = "accepted" when user accepts the response without correction.
         verdict = "rejected" when user corrects or dismisses the response.
         """
-        if not self._initialized or self._sona is None:
+        if not self._initialized or not self._cli_available:
             return
         try:
-            # Tier 1: MicroLoRA instant adaptation
-            await self._sona.micro_update(query, response, verdict)
-            # Tier 3: Record to ReasoningBank for curriculum learning
-            self._sona.reasoning_bank.record(
-                query=query,
-                response=response,
-                verdict=verdict,
-                metadata={"route": route, **(metadata or {})},
+            # Record interaction via CLI for SONA learning
+            import json
+            payload = json.dumps({
+                "query": query[:500],
+                "response": response[:500],
+                "verdict": verdict,
+                "route": route,
+                **(metadata or {}),
+            })
+            subprocess.run(
+                ["npx", "--yes", "ruvector", "sona", "record", "--json", payload],
+                capture_output=True, text=True, timeout=10,
             )
         except Exception as e:
             logger.warning("SONA on_interaction failed (non-fatal): %s", e)
 
     async def get_stats(self) -> dict:
         """Return SONA learning stats for TuneLab display."""
-        if not self._initialized or self._sona is None:
+        if not self._initialized or not self._cli_available:
             return {"status": "unavailable", "initialized": False}
         try:
-            return {
-                "status": "active",
-                "initialized": True,
-                "micro_lora_rank": self._sona.micro_lora_rank,
-                "reasoning_bank_size": self._sona.reasoning_bank.size(),
-            }
+            result = subprocess.run(
+                ["npx", "--yes", "ruvector", "sona", "--status"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                import json
+                try:
+                    stats = json.loads(result.stdout)
+                    return {"status": "active", "initialized": True, **stats}
+                except (json.JSONDecodeError, ValueError):
+                    return {"status": "active", "initialized": True, "raw": result.stdout.strip()}
+            return {"status": "error", "initialized": True, "error": result.stderr.strip()}
         except Exception as e:
             logger.warning("SONA get_stats failed: %s", e)
             return {"status": "error", "initialized": True, "error": str(e)}

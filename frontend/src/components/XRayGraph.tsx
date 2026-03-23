@@ -105,7 +105,7 @@ export default function XRayGraph({ graph, onClose }: Props): JSX.Element {
             {/* Header */}
             <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: "var(--border-subtle)" }}>
                 <div className="flex items-center gap-2">
-                    <span className="badge-plasma">X-Ray</span>
+                    <span className="badge-plasma mr-1">X-Ray</span>
                     <span className="text-xs text-secondary">Causal Graph</span>
                     {graph && <span className="text-xs text-muted">{graph.total_latency_ms.toFixed(0)}ms total</span>}
                 </div>

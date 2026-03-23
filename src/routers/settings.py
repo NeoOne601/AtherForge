@@ -152,6 +152,28 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "learning": {
+        "label": "🧠 Neural Learning",
+        "description": "Configuration for perpetual learning (OPLoRA and SONA)",
+        "fields": {
+            "OPLORA_NIGHTLY_HOUR": {
+                "label": "Nightly Training Hour",
+                "description": "Hour of the day to run batch OPLoRA training (0-23)",
+                "type": "number",
+                "default": 3,
+                "min": 0,
+                "max": 23,
+            },
+            "OPLORA_NIGHTLY_MINUTE": {
+                "label": "Nightly Training Minute",
+                "description": "Minute of the hour to run batch OPLoRA training (0-59)",
+                "type": "number",
+                "default": 0,
+                "min": 0,
+                "max": 59,
+            },
+        },
+    },
 }
 
 

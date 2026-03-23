@@ -6,11 +6,14 @@ from typing import Any, cast
 
 import structlog  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status  # type: ignore[import-untyped]
+from fastapi.responses import JSONResponse  # type: ignore[import-untyped]
+from pydantic import BaseModel  # type: ignore[import-untyped]
 
 from src.chat_contract import sanitize_output  # type: ignore[import-untyped]
 from src.schemas import ChatRequest, ChatResponse  # type: ignore[import-untyped]
 from src.services.chat_turns import (
     bootstrap_session,
+    execute_stream_turn,
     execute_turn,
     iter_stream_chunks,
     persist_turn,
@@ -137,8 +140,9 @@ class ModelSelectionPayload(BaseModel):
     model_id: str
 
 @router.post("/chat/model")
-async def update_chat_model(payload: ModelSelectionPayload, state: AppState = Depends(get_app_state)):
+async def update_chat_model(payload: ModelSelectionPayload, fastapi_request: Request):
     """Switch the active chat model and persist the runtime selection."""
+    state = fastapi_request.app.state.app_state
     model_id = payload.model_id
     ok = await state.meta_agent.switch_model(model_id)
     if not ok:
@@ -208,75 +212,24 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                     active = False
                     break
 
-                result = await execute_turn(
+                # ── True Streaming Turn ──────────────────────────
+                async for chunk in execute_stream_turn(
                     state,
                     session_id=internal_sid,
                     module=module,
                     message=message,
                     xray_mode=xray_mode,
                     context=context,
-                )
-                await persist_turn(
-                    state,
-                    session_id=internal_sid,
-                    module=module,
-                    message=message,
-                    result=result,
-                    wait_for_persist=True,
-                )
-
-                for tool_call in result.tool_calls:
-                    tool_name = str(tool_call.get("name", "tool"))
-                    tool_args = cast(dict[str, Any], tool_call.get("arguments") or tool_call.get("args") or {})
-                    tool_result = tool_call.get("result")
+                ):
                     try:
-                        await websocket.send_json({"type": "tool_start", "name": tool_name, "args": tool_args})
-                        if tool_result is not None:
-                            await websocket.send_json(
-                                {"type": "tool_result", "name": tool_name, "result": str(tool_result)}
-                            )
+                        await websocket.send_json(chunk)
+                        if chunk.get("type") == "done":
+                            active = False
+                            break
                     except (WebSocketDisconnect, RuntimeError):
                         active = False
                         break
-
-                if active and result.reasoning_summary:
-                    thinking_t0 = time.perf_counter()
-                    for chunk in iter_stream_chunks(result.reasoning_summary):
-                        try:
-                            await websocket.send_json({"type": "thinking", "content": chunk})
-                        except (WebSocketDisconnect, RuntimeError):
-                            active = False
-                            break
-                        await asyncio.sleep(0.01)
-                    if active:
-                        thinking_ms = round((time.perf_counter() - thinking_t0) * 1000, 1)
-                        try:
-                            await websocket.send_json({"type": "thinking_complete", "duration_ms": thinking_ms})
-                        except (WebSocketDisconnect, RuntimeError):
-                            active = False
-
-                if active:
-                    for chunk in iter_stream_chunks(result.answer_text or result.response):
-                        clean = _strip_think_tags(chunk, is_stream=True)
-                        if not clean and chunk:
-                            continue
-                        try:
-                            await websocket.send_json({"type": "answer", "content": clean})
-                        except (WebSocketDisconnect, RuntimeError):
-                            active = False
-                            break
-                        await asyncio.sleep(0.01)
-
-                if active:
-                    done_event = result.model_dump()
-                    done_event["type"] = "done"
-                    done_event["thinking"] = result.reasoning_summary or result.reasoning_trace or None
-                    done_event["thinking_duration_ms"] = result.latency_ms
-                    try:
-                        await websocket.send_json(done_event)
-                    except (WebSocketDisconnect, RuntimeError):
-                        active = False
-
+                
                 if not active:
                     break
 

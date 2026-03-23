@@ -25,17 +25,33 @@ _TOOL_JSON_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Broader pattern: bare JSON with "name"/"arguments" keys (no markdown fences)
+_BARE_TOOL_JSON_RE = re.compile(
+    r"\{[^{}]*\"name\"\s*:\s*\"(?:search_web|get_weather|write_vfs_note|read_vfs_note)[^{}]*\"arguments\"\s*:\s*\{[^{}]*\}[^{}]*\}",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Boilerplate audit instructions that leak from GroundingAuditor
+_AUDIT_BOILERPLATE_RE = re.compile(
+    r"Output the (?:connected|corrected),?\s*citation-?(?:backed|rooted)\s*final answer[^.]*\.?\s*"
+    r"(?:If the search results do not answer the query,?\s*say so honestly\.?)?\s*",
+    re.IGNORECASE,
+)
+
 
 def sanitize_output(text: str, is_stream: bool = False) -> str:
     """Rigorous project-wide guard to strip protocol tags and stray tool JSON from user-facing text."""
     if not text:
         return ""
     # 1. Strip any lingering protocol tags (handle partials like </think)
-    # Using a more robust regex that handles the closing tag correctly
     text = re.sub(r"</?think\s*>? ?", "", text, flags=re.IGNORECASE)
     
     # 2. Strip explicit tool JSON payloads that might have leaked
-    text = _TOOL_JSON_RE.sub(" ", text)
+    text = _TOOL_JSON_RE.sub("", text)
+    # 2b. Strip bare tool JSON (no markdown fences)
+    text = _BARE_TOOL_JSON_RE.sub("", text)
+    # 2c. Strip leaked audit boilerplate
+    text = _AUDIT_BOILERPLATE_RE.sub("", text)
     
     # 3. Cleanup spacing and noise (PRESERVE NEWLINES AND STREAM CONTEXT)
     if is_stream:

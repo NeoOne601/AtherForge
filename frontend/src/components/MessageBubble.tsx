@@ -51,12 +51,15 @@ interface MessageBubbleProps {
     showThinking?: boolean;
     onSuggestionClick?: (suggestion: string) => void;
     onSuggestionSubmit?: (suggestion: string) => void;
+    onFeedback?: (verdict: "accepted" | "corrected", correctionText?: string) => void;
     isLatestMessage?: boolean;
     isStreaming?: boolean;
 }
 
-export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onSuggestionSubmit, isLatestMessage, isStreaming }: MessageBubbleProps) {
+export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onSuggestionSubmit, onFeedback, isLatestMessage, isStreaming }: MessageBubbleProps) {
     const [suggestionsSubmitted, setSuggestionsSubmitted] = useState(false);
+    const [feedbackState, setFeedbackState] = useState<"none" | "accepted" | "correcting" | "corrected">("none");
+    const [correctionText, setCorrectionText] = useState("");
     const isUser = msg.role === "user";
     const fScore = msg.faithfulness_score;
 
@@ -224,6 +227,45 @@ export function MessageBubble({ msg, showThinking = true, onSuggestionClick, onS
                         {msg.blocked && (
                             <span className="badge blocked">🛡 policy applied</span>
                         )}
+                        
+                        {/* SONA Feedback mechanism */}
+                        {!isStreaming && feedbackState !== "none" && feedbackState !== "correcting" ? (
+                            <span className="badge" style={{ color: "var(--accent)", marginLeft: "auto" }}>✓ Feedback sent</span>
+                        ) : !isStreaming && (
+                            <div style={{ display: "flex", gap: "4px", marginLeft: "auto" }}>
+                                <button className="icon-btn" style={{ fontSize: "14px", padding: "2px 6px", border: "none", background: "none", cursor: "pointer", opacity: 0.7 }} title="Good response" onClick={() => { setFeedbackState("accepted"); onFeedback?.("accepted"); }}>👍</button>
+                                <button className="icon-btn" style={{ fontSize: "14px", padding: "2px 6px", border: "none", background: "none", cursor: "pointer", opacity: 0.7 }} title="Needs correction" onClick={() => setFeedbackState("correcting")}>👎</button>
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {feedbackState === "correcting" && (
+                    <div style={{ marginTop: "8px", display: "flex", gap: "8px", alignItems: "center", background: "rgba(0,0,0,0.2)", padding: "8px", borderRadius: "6px" }}>
+                        <input 
+                            type="text" 
+                            style={{ flex: 1, padding: "6px 8px", fontSize: "13px", borderRadius: "4px", border: "1px solid var(--border-color)", background: "var(--bg-main)", color: "var(--text-main)" }}
+                            placeholder="What was wrong? Provide a correction..." 
+                            value={correctionText}
+                            onChange={e => setCorrectionText(e.target.value)}
+                            onKeyDown={e => {
+                                if (e.key === "Enter") {
+                                    setFeedbackState("corrected");
+                                    onFeedback?.("corrected", correctionText);
+                                }
+                            }}
+                            autoFocus
+                        />
+                        <button 
+                            className="btn" 
+                            style={{ padding: "6px 12px", fontSize: "12px", background: "var(--accent)", color: "#000", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600 }}
+                            onClick={() => {
+                                setFeedbackState("corrected");
+                                onFeedback?.("corrected", correctionText);
+                            }}
+                        >
+                            Submit
+                        </button>
                     </div>
                 )}
             </div>

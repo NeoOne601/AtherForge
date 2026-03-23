@@ -78,7 +78,7 @@ AtherForge/
 │   ├── config.py                  # AetherForgeSettings (Pydantic)
 │   └── main.py                    # Entry point + CLI
 ├── frontend/                      # React/Vite/TypeScript HUD
-│   └── src/components/            # ThinkingBlock, X-Ray, TuneLab, DocumentPanel
+│   └── src/components/            # ThinkingBlock, XRayGraph, TuneLab, DocumentPanel
 ├── src-tauri/src/                 # Rust Tauri shell
 │   ├── ruvllm_bridge.rs           # Native GGUF inference via Tauri commands
 │   └── lib.rs                     # Tauri plugin registration
@@ -166,7 +166,8 @@ User Message → frontend → POST /api/v1/ragforge/chat
         │           → _run_llm_sync() (ruvllm or llama-cpp-python)
         │           → SAMR-lite faithfulness check
         → 3. Post-flight: build reasoning trace, citations, suggestions
-  → ChatResponse (with ThinkingBlock, citations, faithfulness_score)
+        → 4. X-Ray Integration: Causal graph yielded in final 'done' chunk
+  → ChatResponse (with ThinkingBlock, citations, faithfulness_score, causal_graph)
 ```
 
 ### Vector Store Architecture (RuVector)

@@ -1,11 +1,37 @@
 from __future__ import annotations
-
+import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from src.utils import safe_create_task
 
 router = APIRouter(prefix="/api/v1", tags=["Learning"])
+logger = logging.getLogger(__name__)
+
+class FeedbackPayload(BaseModel):
+    session_id: str
+    query: str
+    response: str
+    verdict: str  # "accepted" or "corrected"
+    correction: str | None = None
+
+@router.post("/learning/feedback")
+async def submit_feedback(payload: FeedbackPayload, request: Request) -> JSONResponse:
+    state = request.app.state.app_state
+    
+    metadata = {}
+    if payload.correction:
+        metadata["correction"] = payload.correction
+        
+    await state.meta_agent._sona.on_interaction(
+        query=payload.query,
+        response=payload.response,
+        verdict=payload.verdict,
+        route="user_feedback",
+        metadata=metadata
+    )
+    return JSONResponse({"status": "recorded"})
 
 
 @router.post("/learning/trigger")

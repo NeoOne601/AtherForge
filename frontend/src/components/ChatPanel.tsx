@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 
 import { Message, RAGDoc, CausalGraph, MODULES, MODULE_SUGGESTIONS, StoredMessage, PolicyDecision } from "../types";
 import { createChatSocket } from "../lib/tauri";
 import { MessageBubble } from "./MessageBubble";
-import { InlineXRay } from "./InlineXRay";
 
 const RAGForgeHUD = lazy(() => import("./HUDs/RAGForgeHUD").then(m => ({ default: m.RAGForgeHUD })));
 const WatchTowerHUD = lazy(() => import("./HUDs/WatchTowerHUD").then(m => ({ default: m.WatchTowerHUD })));
@@ -50,6 +49,7 @@ export function ChatPanel({
         streamsync: [],
         tunelab: []
     });
+    const [isMaximized, setIsMaximized] = useState(false);
 
     useEffect(() => {
         if (!preloadedMessages) {
@@ -228,6 +228,33 @@ export function ChatPanel({
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages, loading]);
+
+    const handleFeedback = useCallback(async (messageId: string, verdict: "accepted" | "corrected", correction?: string) => {
+        // Find the AI message and the preceding user message
+        const msgIndex = messages.findIndex(m => m.id === messageId);
+        if (msgIndex <= 0) return;
+        
+        const aiMsg = messages[msgIndex];
+        const userMsg = [...messages].slice(0, msgIndex).reverse().find(m => m.role === "user");
+        
+        if (!userMsg) return;
+        
+        try {
+            await fetch("/api/v1/learning/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: sessionId || "unknown",
+                    query: userMsg.content,
+                    response: aiMsg.content,
+                    verdict,
+                    correction: correction || null
+                })
+            });
+        } catch (err) {
+            console.error("SONA feedback failed to submit", err);
+        }
+    }, [messages, sessionId]);
 
     const send = useCallback(async () => {
         const text = input.trim();
@@ -427,6 +454,10 @@ export function ChatPanel({
             });
         } finally {
             setLoading(false);
+            // Ensure focus is restored to the input after response is complete
+            setTimeout(() => {
+                textareaRef.current?.focus();
+            }, 100);
         }
     }, [
         input,
@@ -452,11 +483,20 @@ export function ChatPanel({
     };
 
     return (
-        <div className="chat-container">
+        <div className={`chat-container ${isMaximized ? "maximized" : ""}`}>
             <div className="chat-header">
                 <div className="chat-module-badge">{mod.icon} {mod.name}</div>
                 <div className="chat-title">AI Assistant</div>
                 <div className="chat-subtitle">All processing is 100% local — your data never leaves this machine</div>
+                <div className="chat-header-actions">
+                    <button
+                        className="maximize-btn"
+                        onClick={() => setIsMaximized(!isMaximized)}
+                        title={isMaximized ? "Restore down" : "Maximize chat"}
+                    >
+                        {isMaximized ? "▣" : "🗖"}
+                    </button>
+                </div>
             </div>
 
             <Suspense fallback={<div className="hud-placeholder pulse">Loading {mod.name} Engine...</div>}>
@@ -490,6 +530,7 @@ export function ChatPanel({
                                     showThinking={showThinking}
                                     onSuggestionClick={(s) => { setInput(s); textareaRef.current?.focus(); }}
                                     onSuggestionSubmit={handleSuggestionSubmit}
+                                    onFeedback={(v, c) => handleFeedback(m.id, v, c)}
                                     isLatestMessage={i === messages.length - 1}
                                     isStreaming={loading}
                                 />
@@ -605,10 +646,6 @@ export function ChatPanel({
                         </label>
                     </div>
                 </div>
-            )}
-
-            {xray && xrayGraph && (
-                <InlineXRay graph={xrayGraph} />
             )}
         </div>
     );

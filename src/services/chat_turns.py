@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, AsyncGenerator, Dict, List
 
 import structlog
 
@@ -171,9 +171,15 @@ async def execute_turn(
     message: str,
     xray_mode: bool,
     context: dict[str, Any],
-) -> ChatResponse:
+) -> "ChatResponse":
+    """Execute a non-streaming chat turn and return a complete ChatResponse."""
     t0 = time.perf_counter()
-    result = await state.meta_agent.run(
+    full_content: list[str] = []
+    full_reasoning: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    citations: list[dict[str, Any]] = []
+
+    async for event in state.meta_agent.stream(
         MetaAgentInput(
             session_id=session_id,
             module=module,
@@ -182,43 +188,149 @@ async def execute_turn(
             context=context,
             system_location=state.system_location,
         )
-    )
+    ):
+        etype = event.get("type")
+        content = event.get("content", "")
+        if etype == "token":
+            full_content.append(content)
+        elif etype == "reasoning":
+            full_reasoning.append(content)
+        elif etype == "tool_start":
+            tool_calls.append({"name": event.get("name"), "arguments": event.get("args")})
+        elif etype == "tool_result":
+            if tool_calls:
+                tool_calls[-1]["result"] = event.get("result")
+
     latency_ms = round(float((time.perf_counter() - t0) * 1000), 2)
-    actual_reasoning, answer_text = split_reasoning_trace(result.response)
-    answer_text = answer_text or result.response
-    citations = normalize_citations(result.citations)
+    response_text = "".join(full_content)
+    reasoning_text = "".join(full_reasoning)
+
     synthetic_summary = build_reasoning_summary(
         module=module,
         message=message,
-        answer_text=answer_text,
-        tool_calls=result.tool_calls,
+        answer_text=response_text,
+        tool_calls=tool_calls,
         citations=citations,
     )
-    # Use the actual LLM reasoning chain (from <think> tags) for the ThinkingBlock,
-    # falling back to the synthetic summary if no model reasoning was captured.
-    reasoning_for_display = actual_reasoning or synthetic_summary
     suggestions = generate_suggestions(
         module=module,
-        answer_text=answer_text,
+        answer_text=response_text,
         active_docs=context.get("active_docs") if isinstance(context.get("active_docs"), list) else None,
-        attachments=result.attachments,
     )
+
     return ChatResponse(
         session_id=session_id,
-        response=answer_text,
+        response=response_text,
         module=module,
         latency_ms=latency_ms,
-        tool_calls=result.tool_calls,
-        policy_decisions=result.policy_decisions,
-        causal_graph=result.causal_graph,
-        faithfulness_score=result.faithfulness_score,
-        reasoning_summary=reasoning_for_display,
-        reasoning_trace=synthetic_summary,
-        answer_text=answer_text,
-        citations=citations,
-        attachments=result.attachments,
+        tool_calls=tool_calls,
+        reasoning_summary=reasoning_text or synthetic_summary,
+        answer_text=response_text,
         suggestions=suggestions,
     )
+
+
+async def execute_stream_turn(
+    state: Any,
+    *,
+    session_id: str,
+    module: str,
+    message: str,
+    xray_mode: bool,
+    context: dict[str, Any],
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Execute a chat turn with true streaming from MetaAgent."""
+    from src.meta_agent import MetaAgentInput
+    
+    t0 = time.perf_counter()
+    full_content = []
+    full_reasoning = []
+    tool_calls = []
+    
+    # ── Master Stream from MetaAgent ──────────────────────────
+    async for event in state.meta_agent.stream(
+        MetaAgentInput(
+            session_id=session_id,
+            module=module,
+            message=message,
+            xray_mode=xray_mode,
+            context=context,
+            system_location=state.system_location,
+        )
+    ):
+        etype = event.get("type")
+        content = event.get("content", "")
+        
+        if etype == "token":
+            full_content.append(content)
+            yield {"type": "answer", "content": content}
+        elif etype == "reasoning":
+            full_reasoning.append(content)
+            yield {"type": "thinking", "content": content}
+        elif etype == "tool_start":
+            tool_calls.append({"name": event.get("name"), "arguments": event.get("args")})
+            yield event
+        elif etype == "tool_result":
+            # Update the last tool call with its result
+            if tool_calls:
+                tool_calls[-1]["result"] = event.get("result")
+            yield event
+        elif etype == "done":
+            # Done event from MetaAgent might not have all the metadata we need for the contract
+            pass
+        else:
+            yield event
+
+    # ── Final Processing ──────────────────────────────────────
+    latency_ms = round(float((time.perf_counter() - t0) * 1000), 2)
+    response_text = "".join(full_content)
+    reasoning_text = "".join(full_reasoning)
+    
+    # Generate suggestions and summary for the final 'done' event
+    citations = []  # Grounding citations are added by GroundingAuditor inside stream() if enabled
+    synthetic_summary = build_reasoning_summary(
+        module=module,
+        message=message,
+        answer_text=response_text,
+        tool_calls=tool_calls,
+        citations=citations,
+    )
+    
+    suggestions = generate_suggestions(
+        module=module,
+        answer_text=response_text,
+        active_docs=context.get("active_docs") if isinstance(context.get("active_docs"), list) else None,
+    )
+    
+    # Create final response object for persistence
+    final_result = ChatResponse(
+        session_id=session_id,
+        response=response_text,
+        module=module,
+        latency_ms=latency_ms,
+        tool_calls=tool_calls,
+        reasoning_summary=reasoning_text or synthetic_summary,
+        answer_text=response_text,
+        suggestions=suggestions,
+    )
+    
+    # Force complete the thinking block in UI
+    yield {"type": "thinking_complete", "duration_ms": latency_ms}
+    
+    # Persist the turn
+    await persist_turn(
+        state,
+        session_id=session_id,
+        module=module,
+        message=message,
+        result=final_result,
+        wait_for_persist=False,
+    )
+    
+    # Final 'done' payload for WebSocket
+    done_payload = final_result.model_dump()
+    done_payload["type"] = "done"
+    yield done_payload
 
 
 def iter_stream_chunks(text: str, chunk_size: int = 48) -> list[str]:

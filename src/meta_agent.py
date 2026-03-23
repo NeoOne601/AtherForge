@@ -313,9 +313,9 @@ class StreamSanitizer:
         # 4. Final Flush
         if self.content_buffer:
             # Final check to strip any trailing protocol noise
-            clean = re.sub(r"</?think>", "", self.content_buffer, flags=re.IGNORECASE)
+            clean = re.sub(r"</?think>", "", self.content_buffer, flags=re.IGNORECASE).strip()
             # If it's not a tool start, yield it
-            if not re.search(r"\{?\s*\"?(?:name|tool_name|action)\"?", clean, re.IGNORECASE):
+            if clean and not re.search(r"\{?\s*\"?(?:name|tool_name|action)\"?", clean, re.IGNORECASE):
                 if self.is_thinking:
                     yield {"type": "reasoning", "content": clean}
                 else:
@@ -736,7 +736,9 @@ class MetaAgent:
                     n_ctx=self.settings.bitnet_n_ctx,
                     n_gpu_layers=self.settings.bitnet_n_gpu_layers,
                     n_threads=self.settings.bitnet_n_threads,
-                    use_mlock=True,
+                    use_mlock=False,
+                    n_batch=1024,
+                    flash_attn=True,
                     verbose=False,
                 )
             except ImportError:
@@ -1117,7 +1119,7 @@ class MetaAgent:
         )
 
     def _get_cognitive_rag(self) -> CognitiveRAG:
-        """Lazily create a CognitiveRAG instance that reuses the loaded BitNet + search."""
+        """Lazily create a CognitiveRAG instance that reuses the loaded LLM + search."""
         if not hasattr(self, "_cognitive_rag_instance") or self._cognitive_rag_instance is None:
             from src.modules.ragforge.cognitive_rag import CognitiveRAG # type: ignore
 
@@ -1125,7 +1127,7 @@ class MetaAgent:
                 llm_fn=self._run_llm_sync,
                 search_fn=self._hybrid_search,
             )
-            logger.info("CognitiveRAG pipeline initialized (reusing BitNet + hybrid search)")
+            logger.info("CognitiveRAG pipeline initialized (reusing %s + hybrid search)", self.model_id)
         return self._cognitive_rag_instance
 
     def _get_aether_researcher(self) -> AetherResearcher:
@@ -2342,9 +2344,18 @@ class MetaAgent:
 
     async def stream(self, inp: MetaAgentInput) -> AsyncGenerator[dict[str, Any], None]:
         """True structured streaming for MetaAgent."""
+        causal_nodes: list[dict[str, Any]] = []
+        causal_edges: list[dict[str, Any]] = []
         t0 = time.perf_counter()
         final_module = inp.module if inp.module else "localbuddy"
-        
+
+        def _trace(node: str, data: dict[str, Any], label: str | None = None) -> None:
+            if inp.xray_mode:
+                causal_nodes.append({"id": node, "data": data, "ts": time.perf_counter()})
+                if causal_nodes:
+                    source = causal_nodes[-2]["id"] if len(causal_nodes) > 1 else "start"
+                    causal_edges.append({"source": source, "target": node, "label": label or ""})
+
         # 1. Safety Pre-flight
         decision = self.colosseum.evaluate_request_sync(
             {
@@ -2354,9 +2365,19 @@ class MetaAgent:
                 "tool_call_count": 0,
             }
         )
+        _trace(
+            "colosseum_preflight",
+            {"decision": decision.to_dict(), "latency_ms": (time.perf_counter() - t0) * 1000},
+            label="Safety Gate",
+        )
+
         if not decision.allowed:
             yield {"type": "token", "content": f"[Silicon Colosseum] Blocked: {decision.reason}"}
-            yield {"type": "done", "latency_ms": round((time.perf_counter() - t0) * 1000, 2)} # type: ignore
+            yield {
+                "type": "done",
+                "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "causal_graph": {"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
+            }
             return
 
         # 1.5 Deterministic Query Routing (bypasses LLM for calculation queries)
@@ -2457,8 +2478,13 @@ class MetaAgent:
                 except ValueError as calc_err:
                     yield {"type": "token", "content": f"Calculation error: {calc_err}"}
 
-                yield {"type": "done", "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}
-                return
+                    # Yield final done event for calculations
+                    yield {
+                        "type": "done",
+                        "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
+                        "causal_graph": {"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
+                    }
+                    return
 
         except ImportError as e:
             logger.warning(f"Query router not available: {e}")
@@ -2468,15 +2494,24 @@ class MetaAgent:
         # 2. Memory & Context
         memory = self._get_or_create_memory(inp.session_id)
         memory.append(HumanMessage(content=inp.message)) # type: ignore
+        _trace("memory_retrieval", {"session_id": inp.session_id, "memory_len": len(memory)}, label="Context Loading")
         
         main_module = inp.module if inp.module in _MODULE_CONTEXTS else "localbuddy"
         module_context = _MODULE_CONTEXTS.get(main_module, "")
         
         # ── 2a. System Knowledge Intent Detection ────────────────
         module_context = self._detect_and_inject_system_knowledge(inp.message, module_context)
+        _trace("knowledge_injection", {"module": main_module, "has_system_knowledge": "system_manual" in module_context}, label="Knowledge Retrieval")
         
         from src.core.tool_registry import tool_registry # type: ignore
         tools = tool_registry.get_tool_definitions()
+        
+        # Apply UI Web Grounding toggle
+        web_search_enabled = bool(inp.context.get("web_search_enabled", False))
+        if not web_search_enabled:
+            tools = [t for t in tools if t.get("function", {}).get("name") not in {"search_web", "deep_research", "get_weather"}]
+            # Inject a grounding-aware instruction if tools were removed
+            module_context += "\n\nCRITICAL: Web Grounding is currently DISABLED. If the user asks for real-time data (weather, news), POLITELY explain that you cannot access the web and they should enable 'Web Grounding' in the header."
 
         # 3. LLM Pass with Sanitized Streaming
         prompt = _messages_to_prompt(memory)
@@ -2509,6 +2544,7 @@ class MetaAgent:
             yield event
         
         response_text = "".join(full_response)
+        _trace("initial_llm_pass", {"response_len": len(response_text)}, label="Reasoning & Tool Selection")
         
         # 4. Check for tool calls (Union of sanitizer status and raw text search)
         import re
@@ -2588,6 +2624,7 @@ class MetaAgent:
                             task_obj.cancel()
 
                     yield {"type": "tool_result", "name": tool_name, "result": tool_output}
+                    _trace("tool_execution", {"tool": tool_name, "result_len": len(tool_output)}, label="Tool Output")
                     
                     # Zero-Hallucination Multi-Stage Synthesis
                     # Stage 1: Raw Synthesis (Drafting)
@@ -2614,9 +2651,12 @@ class MetaAgent:
                     s_prompt_str = "\n".join(s_prompt)
                     
                     draft_content = []
-                    async for tok in self._stream_llm_pass(s_prompt_str):
-                         draft_content.append(tok)
-                         yield {"type": "token", "content": tok}
+                    draft_sanitizer = StreamSanitizer(self._stream_llm_pass(s_prompt_str))
+                    async for event in draft_sanitizer:
+                         if event.get("type") in ("token", "answer"):
+                             tok = event["content"]
+                             draft_content.append(tok)
+                             yield {"type": "token", "content": tok}
                     draft_text = "".join(draft_content)
                     
                     # Stage 2 & 3: Grounding Audit & Citation enforcement
@@ -2628,6 +2668,7 @@ class MetaAgent:
                         context=tool_output,
                         query=inp.message
                     )
+                    _trace("grounding_audit", {"input_len": len(draft_text), "output_len": len(verified_output)}, label="Faithfulness Audit")
                     
                     logger.info("MetaAgent: Grounding Audit complete, yielding final output")
                     # Strip any leaked <think> / </think> tags before sending to user.
@@ -2638,10 +2679,12 @@ class MetaAgent:
                     yield {"type": "token", "content": verified_output}
                     
                     # Yield final done event before returning
+                    # Yield final done event before returning
                     yield {
                         "type": "done",
                         "module": final_module,
                         "latency_ms": round((time.perf_counter() - t0) * 1000, 2), # type: ignore
+                        "causal_graph": {"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
                     }
                     return
             except Exception as e:
@@ -2657,6 +2700,7 @@ class MetaAgent:
             "type": "done",
             "module": final_module,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2), # type: ignore
+            "causal_graph": {"nodes": causal_nodes, "edges": causal_edges} if inp.xray_mode else None,
         }
 
     async def _stream_llm_pass(self, prompt: str, grammar: str | None = None) -> AsyncGenerator[str, None]:
@@ -2687,7 +2731,7 @@ class MetaAgent:
                         temperature=registry_params.get("temperature", self.settings.bitnet_temperature),
                         top_p=registry_params.get("top_p", self.settings.bitnet_top_p),
                         repeat_penalty=registry_params.get("repeat_penalty", 1.1),
-                        stop=["<|im_end|>"],
+                        stop=["<|im_end|>", "<|im_start|>", "User:", "Assistant:", "System:"],
                         stream=True,
                         grammar=compiled_grammar,
                     ):
