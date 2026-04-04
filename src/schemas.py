@@ -34,7 +34,7 @@ class AppState:
     document_registry: DocumentRegistry
     document_intelligence: DocumentIntelligenceService
     startup_ms: float
-    selected_chat_model: str = "qwen-2.5-7b"
+    selected_chat_model: str = "gemma-4-e4b"
     selected_vlm_id: str = "smolvlm-256m"
     streamsync_rss_feeds: list[str] = []
     directory_watcher: Any = None

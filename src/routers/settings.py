@@ -25,11 +25,24 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "label": "🤖 AI Models",
         "description": "Paths to LLM model files and Vision Language Models",
         "fields": {
-            "BITNET_MODEL_PATH": {
-                "label": "BitNet Model Path",
-                "description": "Path to the BitNet GGUF model file",
+            "LLM_ENGINE": {
+                "label": "LLM Engine",
+                "description": "Primary inference engine. 'mlx' = Apple Silicon native (Gemma 4), 'gguf' = llama.cpp fallback (Qwen 2.5)",
+                "type": "select",
+                "options": ["mlx", "gguf"],
+                "default": "mlx",
+            },
+            "MLX_MODEL_PATH": {
+                "label": "Gemma 4 MLX Model Path",
+                "description": "Directory containing the Gemma 4 MLX quantized model. Store on external drive to save internal SSD space.",
                 "type": "path",
-                "default": "/Volumes/Apple/AI Model/bitnet-model.gguf",
+                "default": "/Volumes/Apple/AI Model/gemma-4-e4b-it-4bit",
+            },
+            "BITNET_MODEL_PATH": {
+                "label": "GGUF Fallback Model Path",
+                "description": "Path to the GGUF model file (used when engine is set to 'gguf')",
+                "type": "path",
+                "default": "/Volumes/Apple/AI Model/qwen2.5-7b-instruct-q4_k_m.gguf",
             },
             "APPLE_VLM_MODEL_PATH": {
                 "label": "Vision LM (VLM) Path",

@@ -507,13 +507,11 @@ class MetaAgent:
 
         # ── SA-07: SONA 3-tier real-time learning ─────────────
         self._sona = SONAAdapter(
-            model_path=getattr(settings, 'bitnet_model_path', ''),
+            model_path=getattr(settings, 'mlx_model_path', getattr(settings, 'bitnet_model_path', '')),
             data_dir=str(settings.data_dir),
         )
-        # Start SONA in background (non-blocking, fails gracefully)
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(self._sona.initialize())
-        )
+        # SONA is initialized AFTER model loading in initialize() so it gets
+        # the MLX engine reference for native weight injection.
 
         # Declare lazy-initialized attributes explicitly to satisfy static analysis
         self._cognitive_rag_instance: Any | None = None
@@ -558,8 +556,13 @@ class MetaAgent:
             self.context_manager = None
 
     async def initialize(self) -> None:
-        """Load BitNet model in a thread executor (non-blocking)."""
+        """Load LLM engine (MLX Gemma 4 or GGUF fallback) and initialize SONA."""
         await self._load_model()
+
+        # Initialize SONA with MLX engine reference for native weight injection
+        from src.core.mlx_engine import MLXEngine  # type: ignore
+        mlx_ref = self._llm if isinstance(self._llm, MLXEngine) else None
+        await self._sona.initialize(mlx_engine=mlx_ref)
         
         # Register Deep Research planning tools
         try:
@@ -613,25 +616,67 @@ class MetaAgent:
     # We maintain a registry of supported models to ensure plug-and-play
     # consistency and optimized parameters per model.
     _MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+        # ── MLX Native Models (Apple Silicon default) ─────────────
+        "gemma-4-e4b": {
+            "repo": "mlx-community/gemma-4-e4b-it-4bit",
+            "file": None,  # MLX models are directories, not single files
+            "engine": "mlx",
+            "params": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.15},
+            "description": "Gemma 4 E4B — 4-bit MLX (Recommended for M1 8GB+)",
+            "ram_requirement_gb": 5,
+            "context_window": 128000,
+            "features": ["multimodal", "function_calling", "thinking", "140+ languages"],
+        },
+        "gemma-4-e2b": {
+            "repo": "mlx-community/gemma-4-e2b-it-4bit",
+            "file": None,
+            "engine": "mlx",
+            "params": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.15},
+            "description": "Gemma 4 E2B — 4-bit MLX (Lightweight, edge devices)",
+            "ram_requirement_gb": 2.5,
+            "context_window": 128000,
+            "features": ["multimodal", "audio", "function_calling", "thinking"],
+        },
+        # ── GGUF Fallback Models (llama-cpp-python) ───────────────
         "qwen-2.5-7b": {
             "repo": None,
             "file": "qwen2.5-7b-instruct-q4_k_m.gguf",
+            "engine": "gguf",
             "params": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.1},
+            "description": "Qwen 2.5 7B — GGUF/Metal (Legacy fallback)",
+            "ram_requirement_gb": 6,
+            "context_window": 8192,
+            "features": ["reasoning", "tool_calling"],
         },
         "bitnet-b1.58-2b": {
             "repo": None,
             "file": "bitnet-b1.58-2b-4t.gguf",
+            "engine": "gguf",
             "params": {"temperature": 0.1, "top_p": 0.9, "repeat_penalty": 1.1},
+            "description": "BitNet b1.58 2B — Ultra-light GGUF",
+            "ram_requirement_gb": 2,
+            "context_window": 4096,
+            "features": ["lightweight"],
         },
         "gemma-2b": {
             "repo": "bartowski/gemma-2-2b-it-GGUF",
             "file": "gemma-2-2b-it-Q4_K_M.gguf",
+            "engine": "gguf",
             "params": {"temperature": 0.4, "top_p": 0.95, "repeat_penalty": 1.2},
+            "description": "Gemma 2 2B — GGUF (Legacy)",
+            "ram_requirement_gb": 3,
+            "context_window": 8192,
+            "features": ["lightweight"],
         },
         "llama-3-8b": {
             "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
             "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            "engine": "gguf",
             "params": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.1},
+            "description": "Llama 3.2 3B — GGUF",
+            "ram_requirement_gb": 4,
+            "context_window": 8192,
+            "features": ["reasoning"],
         },
     }
 
@@ -657,80 +702,85 @@ class MetaAgent:
 
     async def _load_model(self) -> None:
         """
-        Load Gemini-class GGUF model via llama-cpp-python.
-        Logic is now registry-driven to ensure zero-tolerance for misconfiguration.
+        Load LLM via the configured engine.
+
+        Engine priority (based on settings.llm_engine):
+          1. "mlx"  → Gemma 4 via mlx-lm (Apple Silicon UMA, default)
+          2. "gguf" → Qwen 2.5 / legacy via llama-cpp-python (Metal fallback)
+
+        Within each engine, we auto-detect hardware and fail gracefully.
         """
+        model_id = getattr(self, "selected_chat_model", "gemma-4-e4b")
+        registry_entry = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["gemma-4-e4b"])
+        selected_engine = registry_entry.get("engine", self.settings.llm_engine)
+
+        logger.info(
+            "Initializing LLM from registry",
+            model_id=model_id,
+            engine=selected_engine,
+        )
+
+        # ── Engine 1: Native MLX (Apple Silicon Default) ─────────
+        if selected_engine == "mlx":
+            try:
+                from src.core.mlx_engine import MLXEngine, detect_apple_silicon  # type: ignore
+
+                compat = detect_apple_silicon()
+                if not compat["compatible"]:
+                    logger.warning(
+                        "MLX not compatible on this device: %s — falling back to GGUF",
+                        compat.get("impact_summary", "Unknown issue"),
+                    )
+                    # Fall through to GGUF engine below
+                else:
+                    mlx_path = self.settings.mlx_model_path
+                    if not mlx_path.exists():
+                        logger.warning(
+                            "MLX model not found at %s — using MockLLM. "
+                            "Download with: mlx_lm.convert --hf-path google/gemma-4-e4b-it -q",
+                            mlx_path,
+                        )
+                        self._llm = MockLLM()
+                        return
+
+                    def _load_mlx() -> Any:
+                        engine = MLXEngine(
+                            model_path=str(mlx_path),
+                            max_tokens=self.settings.mlx_max_tokens,
+                        )
+                        engine.load()
+                        return engine
+
+                    loop = self.loop
+                    self._llm = await loop.run_in_executor(None, _load_mlx)  # type: ignore
+                    self.model_id = model_id
+                    logger.info(
+                        "Gemma 4 MLX engine online — UMA zero-copy active",
+                        model_id=model_id,
+                        chip=compat.get("chip", "Unknown"),
+                        ram_gb=compat.get("ram_gb", 0),
+                    )
+                    return
+            except ImportError:
+                logger.warning(
+                    "mlx-lm not installed — falling back to GGUF engine. "
+                    "Install with: pip install mlx mlx-lm"
+                )
+            except Exception as mlx_err:
+                logger.error("MLX engine init failed: %s — falling back to GGUF", mlx_err)
+
+        # ── Engine 2: GGUF via llama-cpp-python (Fallback) ────────
         model_path = self.settings.bitnet_model_path
         if not model_path.exists():
-            logger.warning("Model file not found at %s — using MockLLM", model_path)
+            logger.warning("GGUF model file not found at %s — using MockLLM", model_path)
             self._llm = MockLLM()
             return
 
-        model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
-        logger.info("Initializing LLM from registry", model_id=model_id, path=str(model_path))
-
-        def _load() -> Any:
-            # ── RuvLLM Subprocess Engine (Primary) ───────────────────
-            # Wraps @ruvector/ruvllm CLI for LLM inference.
-            # This is the PRODUCTION engine. llama_cpp is EMERGENCY only.
-            class RuvLLMSubprocessEngine:
-                """Thin wrapper that delegates LLM calls to npx @ruvector/ruvllm."""
-
-                def __init__(self, model_path: str, n_ctx: int = 16384):
-                    self.model_path = model_path
-                    self.n_ctx = n_ctx
-
-                def create_chat_completion(
-                    self,
-                    messages: list[dict[str, str]],
-                    max_tokens: int = 1024,
-                    temperature: float = 0.2,
-                    grammar: Any = None,
-                    **kwargs: Any,
-                ) -> dict:
-                    import subprocess as _sp
-
-                    # Flatten messages into a prompt the CLI understands
-                    prompt = "\n".join(
-                        f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in messages
-                    )
-                    cmd = [
-                        "npx", "--yes", "@ruvector/ruvllm", "generate",
-                        prompt,
-                        "--temperature", str(temperature),
-                    ]
-                    try:
-                        proc = _sp.run(cmd, capture_output=True, text=True, check=True, timeout=120)
-                        text = proc.stdout.strip()
-                        return {
-                            "choices": [{"message": {"role": "assistant", "content": text}}],
-                        }
-                    except _sp.TimeoutExpired:
-                        logger.error("ruvllm subprocess timed out (120s)")
-                        return {
-                            "choices": [{"message": {"role": "assistant", "content": "LLM inference timed out."}}],
-                        }
-                    except Exception as exc:
-                        logger.error("ruvllm subprocess error", error=str(exc))
-                        return {
-                            "choices": [{"message": {"role": "assistant", "content": f"LLM error: {exc}"}}],
-                        }
-
-                # Alias expected by some call-sites
-                def __call__(self, prompt: str, **kw: Any) -> dict:
-                    return self.create_chat_completion(
-                        [{"role": "user", "content": prompt}], **kw
-                    )
-
-            # ── Engine selection ─────────────────────────────────────
-            # Priority: llama_cpp (direct GGUF) → RuvLLM subprocess (fallback)
-            # llama_cpp gives reliable local inference; the subprocess bridge
-            # depends on @ruvector/ruvllm npm package availability.
+        def _load_gguf() -> Any:
             try:
                 from llama_cpp import Llama, LlamaGrammar  # type: ignore
                 setattr(self, "_LlamaGrammar", LlamaGrammar)
-                logger.info("llama_cpp available — using direct GGUF inference (primary engine)")
+                logger.info("llama_cpp available — using GGUF inference (fallback engine)")
                 return Llama(
                     model_path=str(model_path),
                     n_ctx=self.settings.bitnet_n_ctx,
@@ -742,24 +792,18 @@ class MetaAgent:
                     verbose=False,
                 )
             except ImportError:
-                logger.warning(
-                    "llama_cpp not installed — falling back to RuvLLM subprocess bridge",
+                logger.error(
+                    "Neither MLX nor llama_cpp available — no inference engine found"
                 )
-                import subprocess as _sp
-                try:
-                    _sp.run(["npx", "--version"], capture_output=True, check=True, timeout=10)
-                    logger.info("RuvLLM subprocess bridge: npx verified — using ruvllm runtime")
-                    return RuvLLMSubprocessEngine(model_path=str(model_path), n_ctx=16384)
-                except Exception as npx_err:
-                    logger.error("Neither llama_cpp nor npx available", error=str(npx_err))
-                    raise RuntimeError(
-                        "No LLM engine available: install llama-cpp-python or Node.js"
-                    ) from npx_err
+                raise RuntimeError(
+                    "No LLM engine available. Install mlx + mlx-lm (Apple Silicon) "
+                    "or llama-cpp-python (any platform)."
+                )
 
         loop = self.loop
-        self._llm = await loop.run_in_executor(None, _load) # type: ignore
+        self._llm = await loop.run_in_executor(None, _load_gguf)  # type: ignore
         self.model_id = model_id
-        logger.info("LLM engine online", model_id=model_id)
+        logger.info("GGUF fallback engine online", model_id=model_id)
 
     def _get_or_create_vfs(self, session_id: str) -> Any:
         """Get or create a VirtualFileSystem instance for the given session."""
@@ -887,8 +931,8 @@ class MetaAgent:
                 pruned_messages.pop(1) # type: ignore
 
         # ── Registry-Aware Parameters ──────────────────────────
-        model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
-        registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["qwen-2.5-7b"])
+        model_id = getattr(self, "selected_chat_model", "gemma-4-e4b")
+        registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["gemma-4-e4b"])
         registry_params = registry_config.get("params", {})
 
         prompt = _messages_to_prompt(pruned_messages)
@@ -2720,8 +2764,8 @@ class MetaAgent:
                 compiled_grammar = self._compile_grammar(grammar)
                 
                 # ── Registry-Aware Parameters (Streaming) ─────────
-                model_id = getattr(self, "selected_chat_model", "qwen-2.5-7b")
-                registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["qwen-2.5-7b"])
+                model_id = getattr(self, "selected_chat_model", "gemma-4-e4b")
+                registry_config = self._MODEL_REGISTRY.get(model_id, self._MODEL_REGISTRY["gemma-4-e4b"])
                 registry_params = registry_config.get("params", {})
 
                 with self._sync_lock:

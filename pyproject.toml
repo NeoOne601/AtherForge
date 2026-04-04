@@ -87,6 +87,9 @@ dependencies = [
   "pymupdf>=1.24.0",
   "docling>=1.6.0",
   "mlx-vlm>=0.1.0",
+  # ── Apple MLX Native Inference (Gemma 4) ─────────────────────
+  "mlx>=0.22.0",              # Apple's ML framework for UMA inference
+  "mlx-lm>=0.22.0",           # Model loading/generation for MLX
   # ── RuVector Integration (Python Bindings) ───────────────────
   "ruvector>=0.1.0",
   "ruvllm>=0.1.0",

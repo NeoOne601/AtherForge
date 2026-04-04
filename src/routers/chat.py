@@ -119,21 +119,95 @@ async def chat(
 
 @router.get("/chat-models")
 async def get_chat_models(fastapi_request: Request):
-    """Return available local chat models."""
+    """Return available local chat models with device compatibility info."""
     state = fastapi_request.app.state.app_state
+
+    # Get device info for impact display
+    try:
+        from src.core.mlx_engine import detect_apple_silicon  # type: ignore
+        device = detect_apple_silicon()
+    except ImportError:
+        device = {"is_apple_silicon": False, "ram_gb": 0, "mlx_available": False}
+
+    ram_gb = device.get("ram_gb", 0)
+    is_mlx = device.get("mlx_available", False)
+
     models = [
-        {"id": "qwen-2.5-7b", "name": "Qwen 2.5 (7B Instruct)"},
-        {"id": "llama-3-8b", "name": "Llama 3 (8B)"},
-        {"id": "bitnet-b1.58-2b", "name": "BitNet b1.58 (2B)"},
-        {"id": "mixtral-8x7b", "name": "Mixtral 8x7B"},
+        {
+            "id": "gemma-4-e4b",
+            "name": "Gemma 4 E4B — 4-bit MLX (Recommended)",
+            "engine": "mlx",
+            "ram_gb": 5,
+            "context_window": "128K",
+            "features": ["multimodal", "function_calling", "thinking", "140+ languages"],
+            "compatible": is_mlx and ram_gb >= 8,
+            "impact": "~5GB RAM • Native UMA • SONA MicroLoRA active" if is_mlx else "⚠️ Requires Apple Silicon + MLX",
+            "default": True,
+        },
+        {
+            "id": "gemma-4-e2b",
+            "name": "Gemma 4 E2B — 4-bit MLX (Lightweight)",
+            "engine": "mlx",
+            "ram_gb": 2.5,
+            "context_window": "128K",
+            "features": ["multimodal", "audio", "function_calling", "thinking"],
+            "compatible": is_mlx,
+            "impact": "~2.5GB RAM • Native UMA • SONA MicroLoRA active" if is_mlx else "⚠️ Requires Apple Silicon + MLX",
+            "default": False,
+        },
+        {
+            "id": "qwen-2.5-7b",
+            "name": "Qwen 2.5 7B — GGUF/Metal (Fallback)",
+            "engine": "gguf",
+            "ram_gb": 6,
+            "context_window": "8K",
+            "features": ["reasoning", "tool_calling"],
+            "compatible": True,
+            "impact": "~6GB RAM • Metal GPU • SONA trajectory-only (no weight injection)",
+            "default": False,
+        },
+        {
+            "id": "bitnet-b1.58-2b",
+            "name": "BitNet b1.58 2B — Ultra-light",
+            "engine": "gguf",
+            "ram_gb": 2,
+            "context_window": "4K",
+            "features": ["lightweight"],
+            "compatible": True,
+            "impact": "~2GB RAM • CPU/Metal",
+            "default": False,
+        },
     ]
-    
-    current = getattr(state, "selected_chat_model", "qwen-2.5-7b")
-    
+
+    current = getattr(state, "selected_chat_model", "gemma-4-e4b")
+
     return JSONResponse({
         "models": models,
-        "current": current
+        "current": current,
+        "device": {
+            "chip": device.get("chip", "Unknown"),
+            "ram_gb": ram_gb,
+            "mlx_available": is_mlx,
+            "impact_summary": device.get("impact_summary", ""),
+        },
     })
+
+
+@router.get("/device-compatibility")
+async def get_device_compatibility():
+    """Return detailed device compatibility report for the UI."""
+    try:
+        from src.core.mlx_engine import detect_apple_silicon  # type: ignore
+        return detect_apple_silicon()
+    except ImportError:
+        return {
+            "is_apple_silicon": False,
+            "chip": "Unknown",
+            "ram_gb": 0,
+            "mlx_available": False,
+            "compatible": False,
+            "impact_summary": "⚠️ MLX engine module not found. Install mlx + mlx-lm for Apple Silicon support.",
+        }
 
 
 class ModelSelectionPayload(BaseModel):

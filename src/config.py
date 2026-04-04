@@ -65,6 +65,20 @@ class AetherForgeSettings(BaseSettings):
     # "warn" appends a warning badge (legacy, not recommended).
     silicon_colosseum_faithfulness_action: Literal["block", "warn"] = "block"
 
+    # ── LLM Engine Selection ─────────────────────────────────────
+    # "mlx" = Native Apple Silicon via mlx-lm (default, Gemma 4)
+    # "gguf" = llama-cpp-python Metal backend (fallback, Qwen 2.5)
+    llm_engine: Literal["mlx", "gguf"] = "mlx"
+
+    # ── Gemma 4 MLX Model ─────────────────────────────────────────
+    # Default path targets the external volume where large models are stored.
+    # Users can override this via Settings UI to any mounted volume.
+    mlx_model_path: Path = Path("/Volumes/Apple/AI Model/gemma-4-e4b-it-4bit")
+    mlx_max_tokens: int = Field(default=4096, ge=64, le=16384)
+    mlx_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    mlx_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
+    mlx_repetition_penalty: float = Field(default=1.15, ge=1.0, le=2.0)
+
     # Apple Silicon Optimized VLM (mlx-vlm)
     # Default is a placeholder; override via .env or settings.json
     apple_vlm_model_path: Path = Path("./models/vision_model")
@@ -112,7 +126,7 @@ class AetherForgeSettings(BaseSettings):
     oplora_epochs: int = Field(default=3, ge=1, le=50)
 
     # ── Validators ────────────────────────────────────────────────
-    @field_validator("bitnet_model_path", "data_dir", "chroma_path", mode="before")
+    @field_validator("bitnet_model_path", "mlx_model_path", "data_dir", "chroma_path", mode="before")
     @classmethod
     def expand_path(cls, v: str | Path) -> Path:
         """Expand ~ and relative paths at validation time."""
